@@ -93,6 +93,7 @@ class User(AbstractUser, TimeStampedModel):
     phone_number = models.CharField(max_length=20, blank=True, null=True, verbose_name="Número de Telefone")
     bio = models.TextField(blank=True, null=True, verbose_name="Biografia")
     profile_picture = models.ImageField(upload_to='profile_pics/', blank=True, null=True, verbose_name="Foto de Perfil")
+    email = models.EmailField(unique=True, verbose_name="Email", db_index=True)
     groups = models.ManyToManyField(
         Group,
         verbose_name='groups',
