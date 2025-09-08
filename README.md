@@ -1,0 +1,2 @@
+# Salão Conecta
+O Salão Conecta é um sistema de gerenciamento para salões de beleza, desenvolvido em Python. Ele oferece funcionalidades para agendamento de serviços, gerenciamento de clientes e controle de estoque.
