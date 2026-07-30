@@ -1,5 +1,7 @@
 from django.db import models
-from django.contrib.auth.models import AbstractUser, Group, Permission
+from django.contrib.auth.models import AbstractUser, Group, Permission, PermissionsMixin
+
+from manager.management.UserManager import UserManager
 
 
 # --- Base Models ---
@@ -87,9 +89,14 @@ class UserType(models.TextChoices):
 
 
 # --- Custom User Model ---
-class User(AbstractUser, TimeStampedModel):
+class User(AbstractUser, PermissionsMixin, TimeStampedModel):
     """Custom user model with additional fields."""
-    user_type = models.CharField(max_length=50, choices=UserType.choices, default="client")
+    objects = UserManager()
+
+    USERNAME_FIELD = 'email'
+    REQUIRED_FIELDS = []
+
+    user_type = models.CharField(max_length=50, choices=UserType, default="client")
     phone_number = models.CharField(max_length=20, blank=True, null=True, verbose_name="Número de Telefone")
     bio = models.TextField(blank=True, null=True, verbose_name="Biografia")
     profile_picture = models.ImageField(upload_to='profile_pics/', blank=True, null=True, verbose_name="Foto de Perfil")
@@ -110,6 +117,16 @@ class User(AbstractUser, TimeStampedModel):
         related_name="gestao_user_permissions",  # NOME EXCLUSIVO
         related_query_name="gestao_user",
     )
+    date_joined = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Usuário"
+        verbose_name_plural = "Usuários"
+        ordering = ['email']
+        db_table = "user"
+
+    def __str__(self):
+        return self.email
 
 
 # --- Business Models ---
