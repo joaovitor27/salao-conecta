@@ -29,6 +29,11 @@ ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='localhost', cast=lambda v: [s.s
 
 AUTH_USER_MODEL = 'manager.User'
 
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+
 # Application definition
 
 DJANGO_APPS = [
@@ -43,7 +48,8 @@ DJANGO_APPS = [
 TRIGGER_APPS = [
     'rest_framework',
     'rest_framework_simplejwt',
-    'drf_social_oauth2',
+    'rest_framework_simplejwt.token_blacklist',
+    'corsheaders'
 ]
 
 MY_APPS = [
@@ -54,6 +60,7 @@ MY_APPS = [
 INSTALLED_APPS = DJANGO_APPS + TRIGGER_APPS + MY_APPS
 
 MIDDLEWARE = [
+    "corsheaders.middleware.CorsMiddleware",
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -88,7 +95,7 @@ WSGI_APPLICATION = 'salao_conecta.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.postgresql',
+        'ENGINE': config('DATABASE_ENGINE'),
         'NAME': config('DATABASE_NAME'),
         'USER': config('DATABASE_USER'),
         'PASSWORD': config('DATABASE_PASSWORD'),
@@ -141,12 +148,24 @@ MEDIA_ROOT = BASE_DIR / 'media'
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
-DEFAULT_AUTO_FIELD = 'django.db.models.'
+DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ),
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.IsAuthenticated',
+    ],
+    'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.AnonRateThrottle',
+        'rest_framework.throttling.UserRateThrottle'
+    ],
+    'DEFAULT_THROTTLE_RATES': {
+        'anon': '20/minute',
+        'user': '300/minute',
+        'login_attempts': '5/minute'
+    }
 }
 
 SIMPLE_JWT = {
@@ -154,21 +173,26 @@ SIMPLE_JWT = {
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
-    'ALGORITHM': 'HS256',
-    'SIGNING_KEY': SECRET_KEY,
-    'VERIFYING_KEY': None,
-    'AUDIENCE': None,
-    'ISSUER': None,
-    'AUTH_HEADER_TYPES': ('Bearer',),
+    'UPDATE_LAST_LOGIN': True,
     'USER_ID_FIELD': 'id',
     'USER_ID_CLAIM': 'user_id',
     'AUTH_TOKEN_CLASSES': ('rest_framework_simplejwt.tokens.AccessToken',),
-    'TOKEN_TYPE_CLAIM': 'token_type',
-    'JTI_CLAIM': 'jti',
 }
 
-TWO_FACTOR_TOTP_KEY_SIZE = 16
-
-TWO_FACTOR_TOTP_DIGITS = 6
-
-TWO_FACTOR_TOTP_ISSUER = 'Salao Conecta'
+# # Garante que os cookies (se for usar) trafeguem apenas criptografados
+# SESSION_COOKIE_SECURE = True
+# CSRF_COOKIE_SECURE = True
+#
+# # Impede que o front-end (JavaScript) acesse o cookie CSRF
+# CSRF_COOKIE_HTTPONLY = True
+#
+# # Força o navegador a sempre acessar seu backend via HTTPS por 1 ano
+# SECURE_HSTS_SECONDS = 31536000
+# SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+# SECURE_HSTS_PRELOAD = True
+#
+# # Impede que seu site seja "embutido" num iframe falso de outro site (Clickjacking)
+# X_FRAME_OPTIONS = 'DENY'
+#
+# # Diz para o navegador não tentar adivinhar tipos de arquivos (MIME sniffing)
+# SECURE_CONTENT_TYPE_NOSNIFF = True
