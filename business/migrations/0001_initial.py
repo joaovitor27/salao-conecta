@@ -5,6 +5,7 @@ import django.contrib.postgres.fields.ranges
 import django.db.models.deletion
 import uuid
 from django.conf import settings
+from django.contrib.postgres.operations import BtreeGistExtension
 from django.db import migrations, models
 
 
@@ -18,6 +19,7 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+    BtreeGistExtension(),
         migrations.CreateModel(
             name='Salon',
             fields=[

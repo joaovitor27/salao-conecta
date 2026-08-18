@@ -29,6 +29,7 @@ class EmployeeInline(admin.TabularInline):
     model = Employee
     extra = 1
     fields = (
+        'user',
         'full_name',
         'cpf_cnpj',
         'role',

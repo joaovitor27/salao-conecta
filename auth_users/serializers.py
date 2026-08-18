@@ -36,6 +36,20 @@ class UserCreateSerializer(serializers.ModelSerializer):
 
 
 class UserSerializer(serializers.ModelSerializer):
+    salons = serializers.SerializerMethodField()
+
     class Meta:
         model = User
-        fields = ('id', 'username', 'email', 'phone_number')
+        fields = ('id', 'username', 'first_name', 'last_name', 'email', 'phone_number', 'salons')
+        
+    def get_salons(self, obj):
+        from business.models import Salon
+        from django.db.models import Q
+        
+        # O usuário pode estar vinculado como dono ou funcionário ativo
+        salons = Salon.objects.filter(
+            Q(owners=obj) | Q(employees__user=obj, employees__is_active=True),
+            is_active=True
+        ).distinct()
+        
+        return [{"slug": s.slug, "name": s.name} for s in salons]

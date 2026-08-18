@@ -3,7 +3,7 @@ from rest_framework.request import Request
 from rest_framework.exceptions import PermissionDenied, ParseError
 from django.shortcuts import get_object_or_404
 
-from manager.models import Salon, Employee
+from business.models import Salon, Employee
 
 
 class TenantRole:

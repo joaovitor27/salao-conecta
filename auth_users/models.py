@@ -12,7 +12,7 @@ from core.models import TimeStampedModel
 class User(AbstractUser, PermissionsMixin, TimeStampedModel):
     """Custom user model with additional fields."""
     objects = UserManager()
-
+    username = None
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = []
     email = models.EmailField(unique=True, verbose_name="Email")

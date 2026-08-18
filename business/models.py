@@ -55,7 +55,7 @@ class Customer(TimeStampedModel):
 
 class Employee(TimeStampedModel):
     """
-    Substitui a antiga tabela 'Professional'.
+    substitui a antiga tabela 'Professional'.
     Engloba todos os trabalhadores do salão (com ou sem acesso ao sistema).
     """
 
@@ -142,6 +142,7 @@ class Appointment(TimeStampedModel):
     service = models.ForeignKey(ServiceSalon, on_delete=models.PROTECT, related_name='service_appointments',
                                 verbose_name="Serviço Agendado")
     time_range = DateTimeRangeField()
+    discount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00, verbose_name="Desconto")
     notes = models.TextField(blank=True, null=True, verbose_name="Notas Adicionais")
     status = models.CharField(max_length=50, choices=Status, default=Status.PENDING,
                               verbose_name="Status", db_index=True)

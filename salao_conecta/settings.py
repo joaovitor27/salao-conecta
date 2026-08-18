@@ -122,8 +122,18 @@ DATABASES = {
         'PASSWORD': config('DATABASE_PASSWORD'),
         'HOST': config('DATABASE_HOST', default='localhost'),
         'PORT': config('DATABASE_PORT', default='5432'),
+        'TEST': {
+            'NAME': config('DATABASE_TEST_NAME', default='test_salao_conecta'),
+        },
     }
 }
+
+# Se existir um superusuário configurado para rodar os testes (criar/dropar test DB)
+_db_superuser = config('DATABASE_SUPERUSER', default='')
+if _db_superuser:
+    DATABASES['default']['TEST']['USER'] = _db_superuser
+    DATABASES['default']['TEST']['PASSWORD'] = config('DATABASE_SUPERUSER_PASSWORD', default='')
+
 
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
