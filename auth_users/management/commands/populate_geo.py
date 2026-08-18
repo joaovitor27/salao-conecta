@@ -1,7 +1,8 @@
 import requests
 from django.core.management.base import BaseCommand
-from manager.models import Country, State, City
 from django.db import IntegrityError, transaction
+
+from core.models import Country, State, City
 
 
 class Command(BaseCommand):

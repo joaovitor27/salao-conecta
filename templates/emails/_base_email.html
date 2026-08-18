@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}{% endblock %}</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f4f4f4;
+        }
+
+        .container {
+            max-width: 600px;
+            margin: 20px auto;
+            background-color: #ffffff;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+        }
+
+        .header {
+            background-color: #ffffff;
+            color: #112651;
+            padding: 20px;
+            text-align: center;
+        }
+
+        .header .logo-container {
+            text-align: center;
+            margin-bottom: 10px;
+        }
+
+        .header img {
+            max-width: 80%;
+            height: auto;
+            display: block;
+            margin: 0 auto;
+            border: 0;
+        }
+
+        .header h1 {
+            margin: 10px 0 0;
+            font-size: 24px;
+        }
+
+        .content {
+            padding: 30px;
+            color: #333333;
+            line-height: 1.6;
+        }
+
+        .content p {
+            margin: 0 0 15px;
+        }
+
+        .button {
+            display: inline-block;
+            background-color: #2FA646;
+            color: #ffffff;
+            padding: 12px 25px;
+            text-decoration: none;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+
+        .footer {
+            background-color: #eeeeee;
+            color: #777777;
+            padding: 20px;
+            text-align: center;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <div class="logo-container">
+            <img src="cid:logo-system" alt="Logo do sistema" style="width: 150px; max-width: 100%; height: auto; border: 0;" />
+        </div>
+        <h1>{% block header_title %}{% endblock %}</h1>
+    </div>
+    <div class="content">
+        {% block content %}{% endblock %}
+    </div>
+    <div class="footer">
+        <p>Esta é uma mensagem automática. Por favor, não responda a este e-mail.</p>
+        <p>&copy; {% now "Y" %} JVM sistemas</p>
+    </div>
+</div>
+</body>
+</html>

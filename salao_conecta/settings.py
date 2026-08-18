@@ -11,7 +11,9 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 from datetime import timedelta
 from pathlib import Path
-from decouple import config
+
+from corsheaders.defaults import default_headers
+from decouple import config, Csv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -27,12 +29,24 @@ DEBUG = config('DEBUG', default=False, cast=bool)
 
 ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='localhost', cast=lambda v: [s.strip() for s in v.split(',')])
 
-AUTH_USER_MODEL = 'manager.User'
+CORS_ORIGIN_ALLOW_ALL = config('CORS_ORIGIN_ALLOW_ALL', cast=bool, default=False)
+CORS_ALLOWED_ORIGINS = config('CORS_ALLOWED_ORIGINS', cast=lambda v: [s.strip() for s in v.split(',')],
+                              default='http://localhost:3000, http://127.0.0.1:3000')
 
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
+CORS_EXPOSE_HEADERS = [
+    'Content-Disposition',
 ]
+
+CORS_ALLOW_HEADERS = list(default_headers) + [
+    'x-api-key',
+    'x-requested-with',
+    'X-Tenant-Slug'
+]
+
+SYSTEM_NAME = config('SYSTEM_NAME')
+
+CODE_VERSION = 'v1.0.0'
+ENVIRONMENT_SYSTEM = config('ENVIRONMENT_SYSTEM', default='PRODUCTION', cast=str.upper).strip('')
 
 # Application definition
 
@@ -43,21 +57,29 @@ DJANGO_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'django.contrib.humanize',
 ]
 
 TRIGGER_APPS = [
+    'corsheaders',
     'rest_framework',
     'rest_framework_simplejwt',
     'rest_framework_simplejwt.token_blacklist',
-    'corsheaders'
+    'drf_spectacular',
+    'django_filters',
 ]
 
-MY_APPS = [
+LOCAL_APPS = [
     'core.apps.CoreConfig',
     'manager.apps.ManagerConfig',
+    'auth_users.apps.AuthUserConfig',
+    'business.apps.BusinessConfig',
+    'financial.apps.FinancialConfig',
 ]
 
-INSTALLED_APPS = DJANGO_APPS + TRIGGER_APPS + MY_APPS
+INSTALLED_APPS = DJANGO_APPS + TRIGGER_APPS + LOCAL_APPS
+
+AUTH_USER_MODEL = 'auth_users.User'
 
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
@@ -75,8 +97,7 @@ ROOT_URLCONF = 'salao_conecta.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [BASE_DIR / 'templates']
-        ,
+        'DIRS': [BASE_DIR / 'templates'],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -150,7 +171,22 @@ MEDIA_ROOT = BASE_DIR / 'media'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
 
+APPEND_SLASH = False
+
+ITENS_PER_PAGE = config('ITENS_PER_PAGE', cast=int, default=10)
+
 REST_FRAMEWORK = {
+    'DEFAULT_PAGINATION_CLASS': 'core.pagination.CustomPageNumberPagination',
+    'PAGE_SIZE': ITENS_PER_PAGE,
+    'DEFAULT_PARSER_CLASSES': [
+        'rest_framework.parsers.JSONParser',
+        'rest_framework.parsers.FormParser',
+        'rest_framework.parsers.MultiPartParser',
+    ],
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    'DEFAULT_FILTER_BACKENDS': (
+        'django_filters.rest_framework.DjangoFilterBackend',
+    ),
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ),
@@ -168,15 +204,84 @@ REST_FRAMEWORK = {
     }
 }
 
+SPECTACULAR_SETTINGS = {
+    'TITLE': SYSTEM_NAME,
+    'DESCRIPTION': SYSTEM_NAME,
+    'VERSION': CODE_VERSION,
+    'SERVE_INCLUDE_SCHEMA': False,
+    'SCHEMA_PATH_PREFIX': '/api/schema',
+    'SWAGGER_UI_SETTINGS': {
+        'deepLinking': True,
+    },
+    'REDOC_SETTINGS': {
+        'theme': 'dark',
+    },
+    'CONTACT': {
+        'name': 'JVM Sistemas',
+        'url': 'https://jvmsistemas.com',
+    },
+}
+
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=60),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+    'ACCESS_TOKEN_LIFETIME': timedelta(days=365) if ENVIRONMENT_SYSTEM == 'DEVELOPMENT' else timedelta(hours=1),
+    'REFRESH_TOKEN_LIFETIME': timedelta(hours=12),
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
     'UPDATE_LAST_LOGIN': True,
     'USER_ID_FIELD': 'id',
     'USER_ID_CLAIM': 'user_id',
     'AUTH_TOKEN_CLASSES': ('rest_framework_simplejwt.tokens.AccessToken',),
+}
+
+COOLDOWN_RESET_MINUTES = 5
+
+# EMAIL
+if ENVIRONMENT_SYSTEM == 'DEVELOPMENT':
+    EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+    EMAIL_HOST = 'localhost'
+    EMAIL_PORT = 1025
+    EMAIL_USE_TLS = False
+    EMAIL_HOST_USER = ''
+    EMAIL_HOST_PASSWORD = ''
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "verbose": {
+            "format": "{levelname} {asctime} {module} {message}",
+            "style": "{",
+        },
+        "simple": {
+            "format": "{levelname} {message}",
+            "style": "{",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "verbose",
+        },
+    },
+    "loggers": {
+        "django": {
+            "handlers": ["console"],
+            "level": "INFO",  # Mude para 'WARNING' se achar muito poluído
+            "propagate": True,
+        },
+        # Para ver as SQL Queries
+        "django.db.backends": {
+            "handlers": ["console"],
+            "level": "DEBUG",
+            "propagate": False,
+        },
+        # Para logar erros da sua própria aplicação
+        # Substitua 'app_name' pelo nome do seu app ou deixe vazio '' para pegar tudo
+        "": {
+            "handlers": ["console"],
+            "level": "INFO",
+        },
+    },
 }
 
 # # Garante que os cookies (se for usar) trafeguem apenas criptografados

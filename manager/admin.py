@@ -1,5 +1,8 @@
 from django.contrib import admin
-from .models import User, Salon, Address, Employee, Service, ServiceSalon
+
+from auth_users.models import User
+from business.models import ServiceSalon, Service, Employee, Salon
+from core.models import Address
 
 
 # ==========================================
