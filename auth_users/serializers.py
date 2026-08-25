@@ -43,7 +43,7 @@ class UserSerializer(serializers.ModelSerializer):
         fields = ('id', 'username', 'first_name', 'last_name', 'email', 'phone_number', 'salons')
         
     def get_salons(self, obj):
-        from business.models import Salon
+        from business.models import Salon, Employee
         from django.db.models import Q
         
         # O usuário pode estar vinculado como dono ou funcionário ativo
@@ -52,4 +52,22 @@ class UserSerializer(serializers.ModelSerializer):
             is_active=True
         ).distinct()
         
-        return [{"slug": s.slug, "name": s.name} for s in salons]
+        result = []
+        for salon in salons:
+            is_owner = salon.owners.filter(id=obj.id).exists()
+            if is_owner:
+                role = 'owner'
+                employee_id = None
+            else:
+                emp = Employee.objects.filter(salon=salon, user=obj, is_active=True).first()
+                role = emp.role if emp else None
+                employee_id = str(emp.id) if emp else None
+            
+            if role:
+                result.append({
+                    "slug": salon.slug, 
+                    "name": salon.name,
+                    "role": role,
+                    "employee_id": employee_id
+                })
+        return result

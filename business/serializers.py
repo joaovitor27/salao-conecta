@@ -222,9 +222,12 @@ class AppointmentStatusSerializer(serializers.Serializer):
             Appointment.Status.CANCELLED,
         ],
         Appointment.Status.CONFIRMED: [
+            Appointment.Status.PENDING,
             Appointment.Status.COMPLETED,
             Appointment.Status.CANCELLED,
         ],
+        Appointment.Status.COMPLETED: [],
+        Appointment.Status.CANCELLED: [],
     }
 
     status = serializers.ChoiceField(choices=Appointment.Status.choices)
