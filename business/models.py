@@ -126,6 +126,20 @@ class Service(TimeStampedModel):
         db_table = "services"
 
 
+class AppointmentItem(TimeStampedModel):
+    """Itens do Agendamento (Serviços selecionados com preços possivelmente customizados)."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid7, editable=False)
+    appointment = models.ForeignKey('Appointment', on_delete=models.CASCADE, related_name='items')
+    service = models.ForeignKey(ServiceSalon, on_delete=models.PROTECT, related_name='appointment_items')
+    price = models.DecimalField(max_digits=10, decimal_places=2, verbose_name="Preço Cobrado")
+    duration_minutes = models.IntegerField(verbose_name="Duração (minutos)")
+
+    class Meta:
+        db_table = "appointment_items"
+        verbose_name = "Item do Agendamento"
+        verbose_name_plural = "Itens do Agendamento"
+
+
 class Appointment(TimeStampedModel):
     """Model for a client appointment."""
 
@@ -139,8 +153,7 @@ class Appointment(TimeStampedModel):
     client = models.ForeignKey(Customer, on_delete=models.PROTECT, related_name='appointments')
     professional = models.ForeignKey(Employee, on_delete=models.PROTECT, related_name='received_appointments',
                                      verbose_name="Profissional", null=True, blank=True)
-    service = models.ForeignKey(ServiceSalon, on_delete=models.PROTECT, related_name='service_appointments',
-                                verbose_name="Serviço Agendado")
+    total_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00, verbose_name="Valor Total dos Serviços")
     time_range = DateTimeRangeField()
     discount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00, verbose_name="Desconto")
     notes = models.TextField(blank=True, null=True, verbose_name="Notas Adicionais")
@@ -148,7 +161,7 @@ class Appointment(TimeStampedModel):
                               verbose_name="Status", db_index=True)
 
     def __str__(self):
-        return f"Agendamento de {self.client.name} em {self.time_range.start} para {self.service.service.name} no {self.salon.name} - {self.status.upper()}"
+        return f"Agendamento de {self.client.name} em {self.time_range.start} no {self.salon.name} - {self.status.upper()}"
 
     class Meta:
         verbose_name = "Agendamento"

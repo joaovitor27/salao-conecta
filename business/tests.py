@@ -97,16 +97,28 @@ class BaseBusinessTestCase(TestCase):
         self._auth(self.prof_user)
 
     def _make_appointment(self, **overrides):
+        from business.models import AppointmentItem
         now = timezone.now()
         start = overrides.pop('start', now + timedelta(hours=2))
-        end = start + timedelta(minutes=self.service_salon.duration_minutes)
+        service_salon = overrides.pop('service', self.service_salon)
+        end = start + timedelta(minutes=service_salon.duration_minutes)
+        
         defaults = dict(
             salon=self.salon, client=self.customer, professional=self.employee,
-            service=self.service_salon, time_range=DateTimeTZRange(start, end),
+            time_range=DateTimeTZRange(start, end),
             status=Appointment.Status.PENDING,
+            total_price=service_salon.price,
         )
         defaults.update(overrides)
-        return Appointment.objects.create(**defaults)
+        appt = Appointment.objects.create(**defaults)
+        
+        AppointmentItem.objects.create(
+            appointment=appt,
+            service=service_salon,
+            price=service_salon.price,
+            duration_minutes=service_salon.duration_minutes
+        )
+        return appt
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -121,7 +133,7 @@ class AppointmentCreateTests(BaseBusinessTestCase):
         resp = self.client.post('/api/v1/appointments', {
             'client_id': str(self.customer.id),
             'professional_id': str(self.employee.id),
-            'service_id': str(self.service_salon.id),
+            'services': [{'service_id': self.service_salon.id}],
             'start_time': start.isoformat(),
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
@@ -135,7 +147,7 @@ class AppointmentCreateTests(BaseBusinessTestCase):
         resp = self.client.post('/api/v1/appointments', {
             'client_id': str(self.customer.id),
             'professional_id': str(self.employee.id),
-            'service_id': str(self.service_salon.id),
+            'services': [{'service_id': self.service_salon.id}],
             'start_time': past.isoformat(),
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
@@ -148,7 +160,7 @@ class AppointmentCreateTests(BaseBusinessTestCase):
         resp = self.client.post('/api/v1/appointments', {
             'client_id': str(self.customer2.id),
             'professional_id': str(self.employee.id),
-            'service_id': str(self.service_salon.id),
+            'services': [{'service_id': self.service_salon.id}],
             'start_time': (start + timedelta(minutes=10)).isoformat(),
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
@@ -170,7 +182,7 @@ class AppointmentCreateTests(BaseBusinessTestCase):
         resp = self.client.post('/api/v1/appointments', {
             'client_id': str(alien_customer.id),
             'professional_id': str(self.employee.id),
-            'service_id': str(self.service_salon.id),
+            'services': [{'service_id': self.service_salon.id}],
             'start_time': (timezone.now() + timedelta(hours=3)).isoformat(),
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
@@ -190,7 +202,7 @@ class AppointmentCreateTests(BaseBusinessTestCase):
         self._auth_owner()
         resp = self.client.post('/api/v1/appointments', {
             'client_id': str(self.customer.id),
-            'service_id': str(self.service_salon.id),
+            'services': [{'service_id': self.service_salon.id}],
             'start_time': (timezone.now() + timedelta(hours=4)).isoformat(),
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
@@ -263,7 +275,7 @@ class AppointmentDetailTests(BaseBusinessTestCase):
         resp = self.client.put(f'/api/v1/appointments/{appt.pk}', {
             'client_id': str(self.customer.id),
             'professional_id': str(self.employee.id),
-            'service_id': str(self.service_salon.id),
+            'services': [{'service_id': self.service_salon.id}],
             'start_time': (timezone.now() + timedelta(hours=20)).isoformat(),
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
@@ -354,7 +366,7 @@ class DashboardTests(BaseBusinessTestCase):
         resp = self.client.get(f'/api/v1/dashboard?service={self.service_salon2.id}')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         for appt in resp.data['appointments']:
-            self.assertEqual(appt['service_name'], 'Escova')
+            self.assertEqual(appt['items'][0]['service_name'], 'Escova')
 
     def test_dashboard_filter_by_status(self):
         self._auth_owner()

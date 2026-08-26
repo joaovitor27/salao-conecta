@@ -6,7 +6,7 @@ from django.utils import timezone
 from psycopg2.extras import DateTimeTZRange
 from rest_framework import serializers
 
-from business.models import Appointment, ServiceSalon, Employee, Customer, Salon
+from business.models import Appointment, ServiceSalon, Employee, Customer, Salon, AppointmentItem
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +44,19 @@ class CustomerSummarySerializer(serializers.ModelSerializer):
 #  Serializer de LEITURA do Appointment
 # ──────────────────────────────────────────────────────────────
 
+class AppointmentItemSerializer(serializers.ModelSerializer):
+    service_name = serializers.CharField(source='service.service.name', read_only=True)
+
+    class Meta:
+        model = AppointmentItem
+        fields = ('id', 'service', 'service_name', 'price', 'duration_minutes')
+
+
 class AppointmentReadSerializer(serializers.ModelSerializer):
     """Serializer completo de leitura para Agendamentos."""
     professional = EmployeeSummarySerializer(read_only=True)
-    service = ServiceSalonSummarySerializer(read_only=True)
     client = CustomerSummarySerializer(read_only=True)
+    items = AppointmentItemSerializer(many=True, read_only=True)
     start_time = serializers.SerializerMethodField()
     end_time = serializers.SerializerMethodField()
     status_display = serializers.CharField(source='get_status_display', read_only=True)
@@ -59,11 +67,12 @@ class AppointmentReadSerializer(serializers.ModelSerializer):
             'id',
             'client',
             'professional',
-            'service',
+            'items',
             'start_time',
             'end_time',
             'status',
             'status_display',
+            'total_price',
             'discount',
             'notes',
             'created_at',
@@ -87,57 +96,73 @@ class AppointmentReadSerializer(serializers.ModelSerializer):
 #  Serializer de CRIAÇÃO do Appointment
 # ──────────────────────────────────────────────────────────────
 
+class AppointmentItemCreateSerializer(serializers.Serializer):
+    service_id = serializers.IntegerField(help_text="ID do ServiceSalon")
+    price = serializers.DecimalField(max_digits=10, decimal_places=2, required=False)
+
+
 class AppointmentCreateSerializer(serializers.Serializer):
     """
-    Serializer de escrita: recebe campos planos e monta o DateTimeRangeField
-    automaticamente com base na duração do serviço selecionado.
+    Serializer de escrita: recebe itens (serviços) e monta o DateTimeRangeField
+    automaticamente somando as durações.
     """
     client_id = serializers.UUIDField()
     professional_id = serializers.UUIDField(required=False, allow_null=True)
-    service_id = serializers.IntegerField(help_text="ID do ServiceSalon")
+    services = AppointmentItemCreateSerializer(many=True, help_text="Lista de serviços")
     start_time = serializers.DateTimeField(
         help_text="Data e hora de início do agendamento (ISO 8601)"
     )
     discount = serializers.DecimalField(max_digits=10, decimal_places=2, default=0.00, required=False)
     notes = serializers.CharField(required=False, allow_blank=True, default='')
 
-    # ── Validações de campo ──────────────────────────────────
-
     def validate_start_time(self, value):
-        """Impede agendamentos no passado (margem de 5 min)."""
         now = timezone.now()
         if value < now - timedelta(minutes=5):
-            raise serializers.ValidationError(
-                "Não é possível agendar no passado."
-            )
+            raise serializers.ValidationError("Não é possível agendar no passado.")
         return value
-
-    # ── Validação cruzada ────────────────────────────────────
 
     def validate(self, attrs):
         salon: Salon = self.context['request'].salon
 
-        # ── Cliente pertence ao salão? ───────────────────────
         try:
             client = Customer.objects.get(
                 id=attrs['client_id'], salon=salon, is_active=True
             )
         except Customer.DoesNotExist:
-            raise serializers.ValidationError(
-                {"client_id": "Cliente não encontrado neste salão."}
-            )
+            raise serializers.ValidationError({"client_id": "Cliente não encontrado neste salão."})
 
-        # ── Serviço ativo no salão? ──────────────────────────
-        try:
-            service_salon = ServiceSalon.objects.select_related('service').get(
-                id=attrs['service_id'], salon=salon, is_active=True
-            )
-        except ServiceSalon.DoesNotExist:
-            raise serializers.ValidationError(
-                {"service_id": "Serviço não encontrado ou inativo neste salão."}
-            )
+        services_data = attrs.get('services', [])
+        if not services_data:
+            raise serializers.ValidationError({"services": "Pelo menos um serviço é obrigatório."})
 
-        # ── Profissional válido? ─────────────────────────────
+        validated_items = []
+        total_duration = 0
+        from decimal import Decimal
+        total_price = Decimal('0.00')
+
+        for item_data in services_data:
+            try:
+                service_salon = ServiceSalon.objects.select_related('service').get(
+                    id=item_data['service_id'], salon=salon, is_active=True
+                )
+            except ServiceSalon.DoesNotExist:
+                raise serializers.ValidationError(
+                    {"services": f"Serviço ID {item_data['service_id']} não encontrado ou inativo."}
+                )
+            
+            price = item_data.get('price')
+            if price is None:
+                price = service_salon.price
+
+            total_duration += service_salon.duration_minutes
+            total_price += price
+
+            validated_items.append({
+                'service_salon': service_salon,
+                'price': price,
+                'duration_minutes': service_salon.duration_minutes
+            })
+
         professional = None
         if attrs.get('professional_id'):
             try:
@@ -149,15 +174,13 @@ class AppointmentCreateSerializer(serializers.Serializer):
                 )
             except Employee.DoesNotExist:
                 raise serializers.ValidationError(
-                    {"professional_id": "Profissional não encontrado, inativo ou não-agendável neste salão."}
+                    {"professional_id": "Profissional não encontrado, inativo ou não-agendável."}
                 )
 
-        # ── Montar time_range ────────────────────────────────
         start = attrs['start_time']
-        end = start + timedelta(minutes=service_salon.duration_minutes)
+        end = start + timedelta(minutes=total_duration)
         time_range = DateTimeTZRange(lower=start, upper=end)
 
-        # ── Conflito de horário (mesmo profissional)? ────────
         if professional:
             conflict = Appointment.objects.filter(
                 professional=professional,
@@ -173,7 +196,8 @@ class AppointmentCreateSerializer(serializers.Serializer):
                 )
 
         attrs['_client'] = client
-        attrs['_service_salon'] = service_salon
+        attrs['_validated_items'] = validated_items
+        attrs['_total_price'] = total_price
         attrs['_professional'] = professional
         attrs['_time_range'] = time_range
         return attrs
@@ -184,12 +208,24 @@ class AppointmentCreateSerializer(serializers.Serializer):
             salon=salon,
             client=validated_data['_client'],
             professional=validated_data['_professional'],
-            service=validated_data['_service_salon'],
             time_range=validated_data['_time_range'],
+            total_price=validated_data['_total_price'],
             discount=validated_data.get('discount', 0.00),
             notes=validated_data.get('notes', ''),
             status=Appointment.Status.PENDING,
         )
+        
+        items_to_create = [
+            AppointmentItem(
+                appointment=appointment,
+                service=item['service_salon'],
+                price=item['price'],
+                duration_minutes=item['duration_minutes']
+            )
+            for item in validated_data['_validated_items']
+        ]
+        AppointmentItem.objects.bulk_create(items_to_create)
+
         logger.info(
             "Agendamento %s criado | salão=%s profissional=%s",
             appointment.pk, salon.slug,
@@ -200,11 +236,25 @@ class AppointmentCreateSerializer(serializers.Serializer):
     def update(self, instance, validated_data):
         instance.client = validated_data['_client']
         instance.professional = validated_data['_professional']
-        instance.service = validated_data['_service_salon']
         instance.time_range = validated_data['_time_range']
+        instance.total_price = validated_data['_total_price']
         instance.discount = validated_data.get('discount', instance.discount)
         instance.notes = validated_data.get('notes', instance.notes)
         instance.save()
+        
+        # Recriar itens
+        instance.items.all().delete()
+        items_to_create = [
+            AppointmentItem(
+                appointment=instance,
+                service=item['service_salon'],
+                price=item['price'],
+                duration_minutes=item['duration_minutes']
+            )
+            for item in validated_data['_validated_items']
+        ]
+        AppointmentItem.objects.bulk_create(items_to_create)
+
         logger.info("Agendamento %s atualizado | salão=%s", instance.pk, instance.salon.slug)
         return instance
 
@@ -261,16 +311,11 @@ class DashboardAppointmentSerializer(serializers.ModelSerializer):
     professional_name = serializers.CharField(
         source='professional.full_name', default='Sem profissional', read_only=True
     )
-    service_name = serializers.CharField(
-        source='service.service.name', read_only=True
-    )
-    service_price = serializers.DecimalField(
-        source='service.price', max_digits=10, decimal_places=2, read_only=True
-    )
     client_name = serializers.CharField(source='client.name', read_only=True)
     start_time = serializers.SerializerMethodField()
     end_time = serializers.SerializerMethodField()
     status_display = serializers.CharField(source='get_status_display', read_only=True)
+    items = AppointmentItemSerializer(many=True, read_only=True)
 
     class Meta:
         model = Appointment
@@ -278,8 +323,8 @@ class DashboardAppointmentSerializer(serializers.ModelSerializer):
             'id',
             'client_name',
             'professional_name',
-            'service_name',
-            'service_price',
+            'items',
+            'total_price',
             'discount',
             'start_time',
             'end_time',

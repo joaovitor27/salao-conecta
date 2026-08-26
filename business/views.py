@@ -54,8 +54,8 @@ class AppointmentListCreateView(generics.ListCreateAPIView):
     def get_queryset(self):
         salon = self.request.salon
         qs = Appointment.objects.filter(salon=salon).select_related(
-            'professional', 'service', 'service__service', 'client',
-        ).order_by('time_range')
+            'professional', 'client',
+        ).prefetch_related('items__service__service').order_by('time_range')
 
         # Profissionais só veem seus próprios agendamentos
         if getattr(self.request, 'tenant_role', None) == TenantRole.PROFESSIONAL:
@@ -119,8 +119,8 @@ class AppointmentDetailView(generics.RetrieveUpdateDestroyAPIView):
     def get_queryset(self):
         salon = self.request.salon
         qs = Appointment.objects.filter(salon=salon).select_related(
-            'professional', 'service', 'service__service', 'client',
-        )
+            'professional', 'client',
+        ).prefetch_related('items__service__service')
         if getattr(self.request, 'tenant_role', None) == TenantRole.PROFESSIONAL:
             qs = qs.filter(professional__user=self.request.user)
         return qs
@@ -323,8 +323,8 @@ class DashboardView(APIView):
 
         # ── Base queryset ────────────────────────────────────
         qs = Appointment.objects.filter(salon=salon).select_related(
-            'professional', 'service', 'service__service', 'client',
-        )
+            'professional', 'client',
+        ).prefetch_related('items__service__service')
 
         # ── Filtro de data ───────────────────────────────────
         date_str = request.query_params.get('date')
@@ -332,15 +332,11 @@ class DashboardView(APIView):
         date_to_str = request.query_params.get('date_to')
 
         if date_from_str or date_to_str:
-            # Intervalo customizado
             if date_from_str:
                 try:
                     d = date.fromisoformat(date_from_str)
                 except ValueError:
-                    return Response(
-                        {"date_from": "Formato inválido. Use YYYY-MM-DD."},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
+                    return Response({"date_from": "Formato inválido. Use YYYY-MM-DD."}, status=status.HTTP_400_BAD_REQUEST)
                 start_dt = timezone.make_aware(datetime.combine(d, time.min))
                 qs = qs.filter(time_range__startswith__gte=start_dt)
 
@@ -348,21 +344,14 @@ class DashboardView(APIView):
                 try:
                     d = date.fromisoformat(date_to_str)
                 except ValueError:
-                    return Response(
-                        {"date_to": "Formato inválido. Use YYYY-MM-DD."},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
+                    return Response({"date_to": "Formato inválido. Use YYYY-MM-DD."}, status=status.HTTP_400_BAD_REQUEST)
                 end_dt = timezone.make_aware(datetime.combine(d, time.max))
                 qs = qs.filter(time_range__startswith__lte=end_dt)
         else:
-            # Data específica (padrão: hoje)
             try:
                 target_date = date.fromisoformat(date_str) if date_str else timezone.localdate()
             except ValueError:
-                return Response(
-                    {"date": "Formato inválido. Use YYYY-MM-DD."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+                return Response({"date": "Formato inválido. Use YYYY-MM-DD."}, status=status.HTTP_400_BAD_REQUEST)
             day_start = timezone.make_aware(datetime.combine(target_date, time.min))
             day_end = timezone.make_aware(datetime.combine(target_date, time.max))
             qs = qs.filter(
@@ -379,19 +368,17 @@ class DashboardView(APIView):
         service_ids = request.query_params.get('service')
         if service_ids:
             ids = [v.strip() for v in service_ids.split(',') if v.strip()]
-            qs = qs.filter(service__id__in=ids)
+            qs = qs.filter(items__service__id__in=ids)
 
         status_values = request.query_params.get('status')
         if status_values:
             values = [v.strip() for v in status_values.split(',') if v.strip()]
             qs = qs.filter(status__in=values)
 
-        # ── Profissional só vê seus dados ────────────────────
         if getattr(request, 'tenant_role', None) == TenantRole.PROFESSIONAL:
             qs = qs.filter(professional__user=request.user)
 
-        # ── Métricas ─────────────────────────────────────────
-        qs = qs.order_by('time_range')
+        qs = qs.distinct().order_by('time_range')
 
         from django.db.models import F
         aggregation = qs.aggregate(
@@ -401,11 +388,11 @@ class DashboardView(APIView):
             confirmed=Count('id', filter=Q(status=Appointment.Status.CONFIRMED)),
             cancelled=Count('id', filter=Q(status=Appointment.Status.CANCELLED)),
             estimated_revenue=Sum(
-                F('service__price') - F('discount'),
+                F('total_price') - F('discount'),
                 filter=~Q(status=Appointment.Status.CANCELLED),
             ),
             completed_revenue=Sum(
-                F('service__price') - F('discount'),
+                F('total_price') - F('discount'),
                 filter=Q(status=Appointment.Status.COMPLETED),
             ),
         )

@@ -26,7 +26,7 @@ class AppointmentFilter(filters.FilterSet):
         label='IDs dos profissionais (separados por vírgula)',
     )
     service = filters.BaseInFilter(
-        field_name='service__id',
+        field_name='items__service__id',
         label='IDs dos serviços do salão (separados por vírgula)',
     )
     status = filters.BaseInFilter(
