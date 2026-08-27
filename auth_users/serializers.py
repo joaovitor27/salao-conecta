@@ -44,30 +44,32 @@ class UserSerializer(serializers.ModelSerializer):
         
     def get_salons(self, obj):
         from business.models import Salon, Employee
-        from django.db.models import Q
         
-        # O usuário pode estar vinculado como dono ou funcionário ativo
-        salons = Salon.objects.filter(
-            Q(owners=obj) | Q(employees__user=obj, employees__is_active=True),
-            is_active=True
-        ).distinct()
-        
+        # Salões como dono
+        owned_salons = Salon.objects.filter(owners=obj, is_active=True)
+        # Salões como funcionário (com login)
+        employee_salons = Salon.objects.filter(
+            employees__user=obj, employees__is_active=True
+        ).exclude(id__in=owned_salons).distinct()
+
         result = []
-        for salon in salons:
-            is_owner = salon.owners.filter(id=obj.id).exists()
-            if is_owner:
-                role = 'owner'
-                employee_id = None
-            else:
-                emp = Employee.objects.filter(salon=salon, user=obj, is_active=True).first()
-                role = emp.role if emp else None
-                employee_id = str(emp.id) if emp else None
-            
-            if role:
+        for salon in owned_salons:
+            emp = Employee.objects.filter(salon=salon, user=obj, is_active=True).first()
+            result.append({
+                "slug": salon.slug,
+                "name": salon.name,
+                "role": "owner",
+                "employee_id": str(emp.id) if emp else None,
+            })
+
+        for salon in employee_salons:
+            emp = Employee.objects.filter(salon=salon, user=obj, is_active=True).first()
+            if emp and emp.role not in Employee.ROLES_WITHOUT_LOGIN:
                 result.append({
-                    "slug": salon.slug, 
+                    "slug": salon.slug,
                     "name": salon.name,
-                    "role": role,
-                    "employee_id": employee_id
+                    "role": emp.role,
+                    "employee_id": str(emp.id),
                 })
+
         return result

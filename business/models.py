@@ -2,11 +2,20 @@ import uuid
 
 from django.contrib.postgres.constraints import ExclusionConstraint
 from django.contrib.postgres.fields import RangeOperators, DateTimeRangeField
+from django.core.exceptions import ValidationError
+from django.core.validators import RegexValidator
 from django.db import models
 from django.utils.translation import gettext_lazy as _
 
 
 from core.models import TimeStampedModel, Address
+
+DEFAULT_PRIMARY_COLOR = '#233B5C'
+
+hex_color_validator = RegexValidator(
+    regex=r'^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$',
+    message="Informe uma cor em hexadecimal. Ex: #233B5C.",
+)
 
 
 class Salon(TimeStampedModel):
@@ -25,6 +34,32 @@ class Salon(TimeStampedModel):
     is_active = models.BooleanField(default=True, verbose_name="Ativo")
     operating_hours = models.JSONField(default=dict, verbose_name="Horário de Funcionamento", blank=True, null=True)
     owners = models.ManyToManyField('auth_users.User', related_name='owned_salons')
+
+    # ── Identidade visual (white-label por salão) ────────────
+    display_name = models.CharField(
+        max_length=60, blank=True, verbose_name="Nome de Exibição",
+        help_text="Nome curto exibido no menu e cabeçalho. Se vazio, usa o nome do salão.",
+    )
+    tagline = models.CharField(
+        max_length=80, blank=True, verbose_name="Slogan",
+        help_text="Frase curta exibida abaixo do nome. Ex: A beleza na palma da sua mão.",
+    )
+    primary_color = models.CharField(
+        max_length=7, default=DEFAULT_PRIMARY_COLOR, validators=[hex_color_validator],
+        verbose_name="Cor Principal", help_text="Cor base da identidade visual em hexadecimal.",
+    )
+    secondary_color = models.CharField(
+        max_length=7, blank=True, null=True, validators=[hex_color_validator],
+        verbose_name="Cor Secundária", help_text="Opcional. Se vazio, é derivada da cor principal.",
+    )
+    accent_color = models.CharField(
+        max_length=7, blank=True, null=True, validators=[hex_color_validator],
+        verbose_name="Cor de Destaque", help_text="Opcional. Se vazio, é derivada da cor principal.",
+    )
+
+    @property
+    def brand_name(self) -> str:
+        return self.display_name or self.name
 
     def __str__(self):
         return self.slug
@@ -50,20 +85,25 @@ class Customer(TimeStampedModel):
 
     class Meta:
         db_table = "customers"
-        unique_together = ('phone', 'salon')
+        unique_together = ('cpf', 'salon')
 
 
 class Employee(TimeStampedModel):
     """
-    substitui a antiga tabela 'Professional'.
-    Engloba todos os trabalhadores do salão (com ou sem acesso ao sistema).
+    Engloba todos os trabalhadores do salão.
+    Profissionais e Apoio NÃO possuem acesso ao sistema (user deve ser null).
+    Apenas Owner (via Salon.owners), Manager, Financial e Receptionist fazem login.
     """
 
     class Role(models.TextChoices):
         MANAGER = 'manager', _('Gerente/Administrador')
+        FINANCIAL = 'financial', _('Financeiro')
         RECEPTIONIST = 'receptionist', _('Recepcionista')
         PROFESSIONAL = 'professional', _('Profissional da Beleza')
         SUPPORT = 'support', _('Apoio (Faxina, Manutenção)')
+
+    # Papéis que NÃO podem ter login (User vinculado)
+    ROLES_WITHOUT_LOGIN = {Role.PROFESSIONAL, Role.SUPPORT}
 
     class ContractType(models.TextChoices):
         FIXED = 'fixed', _('Fixo (CLT/Mensalista)')
@@ -87,9 +127,37 @@ class Employee(TimeStampedModel):
 
     is_active = models.BooleanField(default=True)
 
+    def clean(self):
+        super().clean()
+        if self.role in self.ROLES_WITHOUT_LOGIN and self.user is not None:
+            raise ValidationError(
+                "Profissionais e Apoio não possuem acesso ao sistema. "
+                "Remova o usuário vinculado."
+            )
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
     class Meta:
         db_table = "employee"
         unique_together = ('cpf_cnpj', 'salon')
+
+
+class EmployeeService(TimeStampedModel):
+    """Vincula profissional aos serviços que ele realiza, com comissão personalizada."""
+    employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name='employee_services')
+    service = models.ForeignKey('ServiceSalon', on_delete=models.CASCADE, related_name='employee_services')
+    commission_rate = models.DecimalField(
+        max_digits=5, decimal_places=2, null=True, blank=True,
+        help_text="Comissão específica para este serviço. Se null, usa a comissão padrão do profissional."
+    )
+
+    class Meta:
+        db_table = "employee_services"
+        unique_together = ('employee', 'service')
+        verbose_name = "Serviço do Profissional"
+        verbose_name_plural = "Serviços dos Profissionais"
 
 
 class ServiceSalon(TimeStampedModel):

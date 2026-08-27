@@ -1,6 +1,6 @@
 from django_filters import rest_framework as filters
 
-from business.models import Appointment
+from business.models import Appointment, Employee
 
 
 class AppointmentFilter(filters.FilterSet):
@@ -61,3 +61,40 @@ class AppointmentFilter(filters.FilterSet):
             timezone.datetime.combine(value, timezone.datetime.max.time())
         )
         return queryset.filter(time_range__startswith__lte=end)
+
+
+
+class EmployeeFilter(filters.FilterSet):
+    """
+    Filtro de funcionários.
+
+    `service` aceita vários IDs separados por vírgula e retorna apenas quem
+    realiza TODOS os serviços informados (usado no agendamento).
+    """
+    role = filters.BaseInFilter(
+        field_name='role',
+        label='Papéis (separados por vírgula)',
+    )
+    contract_type = filters.BaseInFilter(
+        field_name='contract_type',
+        label='Tipos de contrato (separados por vírgula)',
+    )
+    is_active = filters.BooleanFilter(field_name='is_active', label='Somente ativos')
+    is_schedulable = filters.BooleanFilter(field_name='is_schedulable', label='Atende na agenda')
+    service = filters.BaseInFilter(
+        method='filter_service',
+        label='IDs dos serviços do salão (separados por vírgula)',
+    )
+
+    class Meta:
+        model = Employee
+        fields = []
+
+    @staticmethod
+    def filter_service(queryset, _name, value):
+        """Interseção: o funcionário precisa realizar todos os serviços informados."""
+        for service_id in value:
+            if service_id in (None, ''):
+                continue
+            queryset = queryset.filter(employee_services__service_id=service_id)
+        return queryset.distinct()
