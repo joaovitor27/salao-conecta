@@ -133,12 +133,11 @@ class NewBusinessRulesTests(BaseBusinessTestCase):
         start = timezone.now() + timedelta(hours=3)
         resp = self.client.post('/api/v1/appointments', {
             'client_id': str(self.customer.id),
-            'professional_id': str(self.owner_employee.id),
-            'services': [{'service_id': self.service_salon.id}],
+            'services': [{'service_id': self.service_salon.id, 'professional_id': str(self.owner_employee.id)}],
             'start_time': start.isoformat(),
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(resp.data['professional']['full_name'], 'Owner Profissional')
+        self.assertEqual(resp.data['items'][0]['professional_name'], 'Owner Profissional')
 
     def test_professional_cannot_login(self):
         # Validação de model
@@ -185,8 +184,7 @@ class NewBusinessRulesTests(BaseBusinessTestCase):
         start = timezone.now() + timedelta(hours=5)
         resp = self.client.post('/api/v1/appointments', {
             'client_id': str(self.customer.id),
-            'professional_id': str(self.pure_professional.id),
-            'services': [{'service_id': self.service_salon2.id, 'duration_minutes': 120}],
+            'services': [{'service_id': self.service_salon2.id, 'professional_id': str(self.pure_professional.id), 'duration_minutes': 120}],
             'start_time': start.isoformat(),
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
@@ -199,8 +197,7 @@ class NewBusinessRulesTests(BaseBusinessTestCase):
         # owner_employee só faz service_salon. Se tentarmos service_salon2:
         resp = self.client.post('/api/v1/appointments', {
             'client_id': str(self.customer.id),
-            'professional_id': str(self.owner_employee.id),
-            'services': [{'service_id': self.service_salon2.id}],
+            'services': [{'service_id': self.service_salon2.id, 'professional_id': str(self.owner_employee.id)}],
             'start_time': start.isoformat(),
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
@@ -220,3 +217,108 @@ class NewBusinessRulesTests(BaseBusinessTestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         # Should be empty, not seeing customer1
         self.assertEqual(len(resp.data), 0)
+
+class AppointmentMultiServiceTest(BaseBusinessTestCase):
+    def test_multi_service_different_professionals(self):
+        self._auth(self.manager_user)
+        start = timezone.now() + timedelta(hours=3)
+        resp = self.client.post('/api/v1/appointments', {
+            'client_id': str(self.customer.id),
+            'services': [
+                {'service_id': self.service_salon.id, 'professional_id': str(self.owner_employee.id)},
+                {'service_id': self.service_salon2.id, 'professional_id': str(self.pure_professional.id)}
+            ],
+            'start_time': start.isoformat(),
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertNotIn('professional', resp.data)
+        self.assertEqual(len(resp.data['items']), 2)
+        prof_names = {item['professional_name'] for item in resp.data['items']}
+        self.assertEqual(prof_names, {'Owner Profissional', 'Profissional Puro'})
+
+
+class AppointmentSurchargeTest(BaseBusinessTestCase):
+    def test_surcharge(self):
+        self._auth(self.manager_user)
+        start = timezone.now() + timedelta(hours=4)
+        resp = self.client.post('/api/v1/appointments', {
+            'client_id': str(self.customer.id),
+            'services': [{'service_id': self.service_salon.id}],
+            'surcharge': '20.00',
+            'start_time': start.isoformat(),
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        print('DATA:', resp.data)
+        self.assertEqual(str(resp.data.get('surcharge')), '20.00')
+        # Total price is sum of items
+        self.assertEqual(resp.data['total_price'], '80.00')
+
+
+class AppointmentOptionalClientTest(BaseBusinessTestCase):
+    def test_optional_client(self):
+        self._auth(self.manager_user)
+        start = timezone.now() + timedelta(hours=5)
+        resp = self.client.post('/api/v1/appointments', {
+            'services': [{'service_id': self.service_salon.id}],
+            'start_time': start.isoformat(),
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertIsNone(resp.data.get('client'))
+
+
+class OperatingHoursTest(BaseBusinessTestCase):
+    def test_operating_hours(self):
+        self._auth(self.owner_user)
+        resp = self.client.patch('/api/v1/salon/operating-hours', {
+            'operating_hours': {'monday': {'open': '09:00', 'close': '18:00'}}
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        
+        get_resp = self.client.get('/api/v1/salon/operating-hours')
+        self.assertEqual(get_resp.data['operating_hours']['monday']['open'], '09:00')
+
+
+class ServiceCRUDTest(BaseBusinessTestCase):
+    def test_service_crud(self):
+        self._auth(self.owner_user)
+        # Create
+        resp = self.client.post('/api/v1/salon/services', {
+            'service_name': 'Novo Servico',
+            'price': '100.00',
+            'duration_minutes': 45
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        srv_id = resp.data['id']
+        
+        # List
+        resp = self.client.get('/api/v1/salon/services')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(any(s['id'] == srv_id for s in resp.data['results']))
+        
+        # Update
+        resp = self.client.patch(f'/api/v1/salon/services/{srv_id}', {
+            'price': '110.00'
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['price'], '110.00')
+        
+        # Delete
+        resp = self.client.delete(f'/api/v1/salon/services/{srv_id}')
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+
+
+class CustomerEditTest(BaseBusinessTestCase):
+    def test_customer_edit(self):
+        self._auth(self.manager_user)
+        resp = self.client.patch(f'/api/v1/customers/{self.customer.id}', {
+            'name': 'Ana Editada',
+            'phone': '11999991111'
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['name'], 'Ana Editada')
+        self.assertEqual(resp.data['phone'], '11999991111')
+
+
+class CollaboradorVerboseNameTest(BaseBusinessTestCase):
+    def test_employee_verbose_name(self):
+        self.assertEqual(Employee._meta.verbose_name, 'Colaborador')

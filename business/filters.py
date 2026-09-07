@@ -22,7 +22,7 @@ class AppointmentFilter(filters.FilterSet):
 
     # ── Filtros inclusivos (IN) ──────────────────────────────
     professional = filters.BaseInFilter(
-        field_name='professional__id',
+        field_name='items__professional__id',
         label='IDs dos profissionais (separados por vírgula)',
     )
     service = filters.BaseInFilter(

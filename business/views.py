@@ -73,9 +73,7 @@ class AppointmentListCreateView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         salon = self.request.salon
-        return Appointment.objects.filter(salon=salon).select_related(
-            'professional', 'client',
-        ).prefetch_related('items__service__service').order_by('time_range')
+        return Appointment.objects.filter(salon=salon).select_related('client').prefetch_related('items__service__service').order_by('time_range')
 
     @extend_schema(
         tags=TAGS_APPOINTMENT,
@@ -132,9 +130,7 @@ class AppointmentDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def get_queryset(self):
         salon = self.request.salon
-        return Appointment.objects.filter(salon=salon).select_related(
-            'professional', 'client',
-        ).prefetch_related('items__service__service')
+        return Appointment.objects.filter(salon=salon).select_related('client').prefetch_related('items__service__service')
 
     @extend_schema(tags=TAGS_APPOINTMENT, summary='Detalhe do agendamento')
     def get(self, request, *args, **kwargs):
@@ -364,9 +360,7 @@ class DashboardView(APIView):
         salon = request.salon
 
         # ── Base queryset ────────────────────────────────────
-        qs = Appointment.objects.filter(salon=salon).select_related(
-            'professional', 'client',
-        ).prefetch_related('items__service__service')
+        qs = Appointment.objects.filter(salon=salon).select_related('client').prefetch_related('items__service__service')
 
         # ── Filtro de data ───────────────────────────────────
         date_str = request.query_params.get('date')
@@ -760,9 +754,9 @@ class AvailabilityView(APIView):
 
         busy: list[tuple[datetime, datetime]] = []
         if professional:
-            booked = Appointment.objects.filter(professional=professional).exclude(
+            booked = Appointment.objects.filter(items__professional=professional).exclude(
                 status=Appointment.Status.CANCELLED
-            )
+            ).distinct()
             raw_appointment = params.get('appointment')
             if raw_appointment and str(raw_appointment).isdigit():
                 booked = booked.exclude(pk=int(raw_appointment))
@@ -801,3 +795,94 @@ class AvailabilityView(APIView):
                 for slot in slots
             ],
         })
+
+
+# ================= NOVO =================
+
+from core.permissions import CanManageCustomers, CanManageSalonProfile
+from business.serializers import CustomerWriteSerializer, ServiceSalonWriteSerializer, ServiceSalonReadSerializer
+from core.pagination import CustomPageNumberPagination
+
+class CustomerDetailView(generics.RetrieveUpdateDestroyAPIView):
+    permission_classes = [TenantAccessPermission, CanManageCustomers]
+    
+    def get_serializer_class(self):
+        if self.request.method in ('PUT', 'PATCH'):
+            return CustomerWriteSerializer
+        return CustomerListSerializer
+    
+    def get_queryset(self):
+        qs = Customer.objects.filter(salon=self.request.salon)
+        from django.db.models import Count, Max
+        return qs.annotate(
+            appointments_count=Count('appointments'),
+            last_visit=Max('appointments__created_at'),
+        )
+    
+    def perform_update(self, serializer):
+        serializer.save(salon=self.request.salon)
+    
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        instance.is_active = False
+        instance.save(update_fields=['is_active'])
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class ServiceSalonManageListCreateView(generics.ListCreateAPIView):
+    permission_classes = [TenantAccessPermission, CanManageSalonProfile]
+    pagination_class = CustomPageNumberPagination
+    
+    def get_serializer_class(self):
+        if self.request.method == 'POST':
+            return ServiceSalonWriteSerializer
+        return ServiceSalonReadSerializer
+    
+    def get_queryset(self):
+        qs = ServiceSalon.objects.filter(salon=self.request.salon).select_related('service')
+        search = self.request.query_params.get('search')
+        if search:
+            qs = qs.filter(service__name__icontains=search)
+        ordering = self.request.query_params.get('ordering', 'service__name')
+        return qs.order_by(ordering)
+    
+    def create(self, request, *args, **kwargs):
+        serializer = ServiceSalonWriteSerializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        service_salon = serializer.save()
+        out = ServiceSalonReadSerializer(service_salon).data
+        return Response(out, status=status.HTTP_201_CREATED)
+
+
+class ServiceSalonDetailView(generics.RetrieveUpdateDestroyAPIView):
+    permission_classes = [TenantAccessPermission, CanManageSalonProfile]
+    
+    def get_serializer_class(self):
+        if self.request.method in ('PUT', 'PATCH'):
+            return ServiceSalonWriteSerializer
+        return ServiceSalonReadSerializer
+    
+    def get_queryset(self):
+        return ServiceSalon.objects.filter(salon=self.request.salon).select_related('service')
+    
+    def update(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = ServiceSalonWriteSerializer(
+            instance, data=request.data, partial=True, context={'request': request}
+        )
+        serializer.is_valid(raise_exception=True)
+        service_salon = serializer.save()
+        out = ServiceSalonReadSerializer(service_salon).data
+        return Response(out)
+
+class OperatingHoursView(APIView):
+    permission_classes = [TenantAccessPermission, CanManageSalonProfile]
+    
+    def get(self, request):
+        return Response({'operating_hours': request.salon.operating_hours or {}})
+    
+    def patch(self, request):
+        salon = request.salon
+        salon.operating_hours = request.data.get('operating_hours', {})
+        salon.save(update_fields=['operating_hours'])
+        return Response({'operating_hours': salon.operating_hours})

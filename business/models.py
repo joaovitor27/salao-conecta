@@ -78,7 +78,7 @@ class Customer(TimeStampedModel):
     user = models.ForeignKey('auth_users.User', on_delete=models.SET_NULL, null=True, blank=True)
     name = models.CharField(max_length=200)
     phone = models.CharField(max_length=20, db_index=True)
-    cpf = models.CharField(max_length=20, db_index=True)
+    cpf = models.CharField(max_length=20, db_index=True, blank=True, default='')
     email = models.EmailField(blank=True, null=True)
     birth_date = models.DateField(blank=True, null=True)
     is_active = models.BooleanField(default=True, verbose_name="Ativo")
@@ -142,6 +142,9 @@ class Employee(TimeStampedModel):
     class Meta:
         db_table = "employee"
         unique_together = ('cpf_cnpj', 'salon')
+        verbose_name = 'Colaborador'
+        verbose_name_plural = 'Colaboradores'
+
 
 
 class EmployeeService(TimeStampedModel):
@@ -156,8 +159,9 @@ class EmployeeService(TimeStampedModel):
     class Meta:
         db_table = "employee_services"
         unique_together = ('employee', 'service')
-        verbose_name = "Serviço do Profissional"
-        verbose_name_plural = "Serviços dos Profissionais"
+        verbose_name = 'Serviço do Colaborador'
+        verbose_name_plural = 'Serviços dos Colaboradores'
+
 
 
 class ServiceSalon(TimeStampedModel):
@@ -199,6 +203,12 @@ class AppointmentItem(TimeStampedModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid7, editable=False)
     appointment = models.ForeignKey('Appointment', on_delete=models.CASCADE, related_name='items')
     service = models.ForeignKey(ServiceSalon, on_delete=models.PROTECT, related_name='appointment_items')
+    professional = models.ForeignKey(
+        Employee, on_delete=models.PROTECT,
+        related_name='appointment_items',
+        null=True, blank=True,
+        verbose_name='Profissional'
+    )
     price = models.DecimalField(max_digits=10, decimal_places=2, verbose_name="Preço Cobrado")
     duration_minutes = models.IntegerField(verbose_name="Duração (minutos)")
 
@@ -218,10 +228,9 @@ class Appointment(TimeStampedModel):
         CANCELLED = "cancelled", "Cancelado"
 
     salon = models.ForeignKey(Salon, on_delete=models.PROTECT, related_name='appointments', verbose_name="Salão")
-    client = models.ForeignKey(Customer, on_delete=models.PROTECT, related_name='appointments')
-    professional = models.ForeignKey(Employee, on_delete=models.PROTECT, related_name='received_appointments',
-                                     verbose_name="Profissional", null=True, blank=True)
+    client = models.ForeignKey(Customer, on_delete=models.SET_NULL, null=True, blank=True, related_name='appointments')
     total_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00, verbose_name="Valor Total dos Serviços")
+    surcharge = models.DecimalField(max_digits=10, decimal_places=2, default=0.00, verbose_name='Acréscimo')
     time_range = DateTimeRangeField()
     discount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00, verbose_name="Desconto")
     notes = models.TextField(blank=True, null=True, verbose_name="Notas Adicionais")
@@ -229,19 +238,10 @@ class Appointment(TimeStampedModel):
                               verbose_name="Status", db_index=True)
 
     def __str__(self):
-        return f"Agendamento de {self.client.name} em {self.time_range.start} no {self.salon.name} - {self.status.upper()}"
+        client_name = self.client.name if self.client else "Sem Cliente"
+        return f"Agendamento de {client_name} em {self.time_range.start} no {self.salon.name} - {self.status.upper()}"
 
     class Meta:
         verbose_name = "Agendamento"
         verbose_name_plural = "Agendamentos"
-        constraints = [
-            ExclusionConstraint(
-                name='prevent_double_booking',
-                expressions=[
-                    ('professional', RangeOperators.EQUAL),
-                    ('time_range', RangeOperators.OVERLAPS),
-                ],
-                condition=~models.Q(status='cancelled')
-            )
-        ]
         db_table = "appointments"

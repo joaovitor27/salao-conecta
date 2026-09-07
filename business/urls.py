@@ -1,5 +1,6 @@
 from django.urls import path
 
+from business import views
 from business.views import (
     AppointmentListCreateView,
     AppointmentDetailView,
@@ -39,6 +40,10 @@ urlpatterns = [
 
     # ── Auxiliares para Dropdowns ────────────────────────────
     path('customers', CustomerListCreateView.as_view(), name='customer-list-create'),
+    path('customers/<uuid:pk>', views.CustomerDetailView.as_view()),
+    path('salon/services', views.ServiceSalonManageListCreateView.as_view()),
+    path('salon/services/<int:pk>', views.ServiceSalonDetailView.as_view()),
+    path('salon/operating-hours', views.OperatingHoursView.as_view()),
     path('employees', EmployeeListView.as_view(), name='employee-list'),
     path('services', ServiceSalonListView.as_view(), name='service-list'),
 ]

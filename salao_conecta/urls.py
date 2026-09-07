@@ -27,6 +27,7 @@ urlpatterns = [
     path('api/v1/', include('manager.urls'), name='manager'),
     path('api/v1/', include('financial.urls'), name='financial'),
     path('api/v1/', include('business.urls'), name='business'),
+    path('api/v1/', include('booking.urls'), name='booking'),
     path('api/v1/', include('auth_users.urls'), name='auth_users'),
     path('', RedirectView.as_view(url=reverse_lazy('swagger-ui')), name='home'),
     path('api/', RedirectView.as_view(url=reverse_lazy('swagger-ui')), name='home'),

@@ -75,6 +75,7 @@ LOCAL_APPS = [
     'auth_users.apps.AuthUserConfig',
     'business.apps.BusinessConfig',
     'financial.apps.FinancialConfig',
+    'booking.apps.BookingConfig',
 ]
 
 INSTALLED_APPS = DJANGO_APPS + TRIGGER_APPS + LOCAL_APPS
