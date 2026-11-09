@@ -1,18 +1,40 @@
 import uuid
-from datetime import timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
+from unittest.mock import MagicMock
 
+import pytest
+from django.core.exceptions import ValidationError
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from psycopg2.extras import DateTimeTZRange
-from rest_framework import status
+from rest_framework import serializers as drf_serializers, status
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import AccessToken
-from django.core.exceptions import ValidationError
 
 from auth_users.models import User
-from business.models import Salon, Employee, Customer, Service, ServiceSalon, Appointment, EmployeeService
-from core.models import Country, State, City, Address
+from business.availability import (
+    DEFAULT_CLOSES_AT,
+    DEFAULT_OPENS_AT,
+    build_slots,
+    get_working_hours,
+)
+from business.models import (
+    Appointment,
+    Customer,
+    Employee,
+    EmployeeService,
+    Salon,
+    Service,
+    ServiceSalon,
+)
+from business.serializers import (
+    AppointmentStatusSerializer,
+    EmployeeWriteSerializer,
+    HexColorField,
+    SalonProfileSerializer,
+)
+from core.models import Address, City, Country, State
 
 
 @override_settings(
@@ -155,7 +177,7 @@ class NewBusinessRulesTests(BaseBusinessTestCase):
 
     def test_financial_cannot_create_appointment(self):
         self._auth(self.financial_user)
-        resp = self.client.post('/api/v1/appointments', {})
+        resp = self.client.post('/api/v1/appointments', {}, format='json')
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_financial_can_access_dashboard(self):
@@ -163,19 +185,19 @@ class NewBusinessRulesTests(BaseBusinessTestCase):
         resp = self.client.get('/api/v1/dashboard')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
-    def test_customer_cpf_required(self):
+    def test_customer_cpf_optional(self):
         self._auth(self.receptionist_user)
         resp = self.client.post('/api/v1/customers', {
-            'name': 'No CPF', 'phone': '123'
-        })
-        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn('cpf', resp.data)
+            'name': 'No CPF', 'phone': '11988887777'
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data['cpf'], '')
 
     def test_customer_duplicate_cpf_same_salon_fails(self):
         self._auth(self.receptionist_user)
         resp = self.client.post('/api/v1/customers', {
             'name': 'Clone', 'phone': '999', 'cpf': '33333333333'
-        })
+        }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('cpf', resp.data)
 
@@ -196,8 +218,8 @@ class NewBusinessRulesTests(BaseBusinessTestCase):
         start = timezone.now() + timedelta(hours=6)
         # owner_employee só faz service_salon. Se tentarmos service_salon2:
         resp = self.client.post('/api/v1/appointments', {
-            'client_id': str(self.customer.id),
-            'services': [{'service_id': self.service_salon2.id, 'professional_id': str(self.owner_employee.id)}],
+            'client_id': str(self.customer.id),\
+            'services': [{'service_id': self.service_salon2.id, 'professional_id': str(self.owner_employee.id)}],\
             'start_time': start.isoformat(),
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
@@ -322,3 +344,267 @@ class CustomerEditTest(BaseBusinessTestCase):
 class CollaboradorVerboseNameTest(BaseBusinessTestCase):
     def test_employee_verbose_name(self):
         self.assertEqual(Employee._meta.verbose_name, 'Colaborador')
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  TESTES UNITÁRIOS PUROS (SERIALIZERS, AVAILABILITY E VALIDAÇÕES SEM BANCO)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestBusinessAvailabilityUnit:
+    """Testes unitários para o motor de cálculo de horários (business/availability.py)."""
+
+    def test_get_working_hours_default_when_empty(self) -> None:
+        monday = date(2026, 11, 9)  # Segunda-feira
+        assert get_working_hours({}, monday) == (DEFAULT_OPENS_AT, DEFAULT_CLOSES_AT)
+        assert get_working_hours(None, monday) == (DEFAULT_OPENS_AT, DEFAULT_CLOSES_AT)
+
+    def test_get_working_hours_supports_multiple_formats_and_closed_days(self) -> None:
+        operating_hours = {
+            'monday': {'open': '09:00', 'close': '18:30'},
+            'terca': '10:00 às 19:00',
+            'wednesday': ['08:30', '17:00'],
+            'sunday': {'closed': True},
+        }
+        assert get_working_hours(operating_hours, date(2026, 11, 9)) == (
+            time(9, 0),
+            time(18, 30),
+        )
+        assert get_working_hours(operating_hours, date(2026, 11, 10)) == (
+            time(10, 0),
+            time(19, 0),
+        )
+        assert get_working_hours(operating_hours, date(2026, 11, 11)) == (
+            time(8, 30),
+            time(17, 0),
+        )
+        assert get_working_hours(operating_hours, date(2026, 11, 15)) is None
+
+    def test_build_slots_respects_duration_and_busy_intervals(self) -> None:
+        future_day = timezone.localdate() + timedelta(days=5)
+        tz = timezone.get_current_timezone()
+        busy_start = timezone.make_aware(datetime.combine(future_day, time(10, 0)), tz)
+        busy_end = timezone.make_aware(datetime.combine(future_day, time(11, 0)), tz)
+
+        slots = build_slots(
+            day=future_day,
+            duration_minutes=60,
+            busy_ranges=[(busy_start, busy_end)],
+            working_hours=(time(9, 0), time(12, 0)),
+            slot_minutes=30,
+        )
+        labels = [s['label'] for s in slots]
+        # 09:00-10:00 (livre), 09:30-10:30 (conflita), 10:00-11:00 (conflita),
+        # 10:30-11:30 (conflita), 11:00-12:00 (livre)
+        assert labels == ['09:00', '11:00']
+        assert all(s['period'] == 'morning' for s in slots)
+
+
+class TestBusinessSerializersUnit:
+    """Testes unitários de campos customizados e validadores de serializers do app business."""
+
+    @pytest.mark.parametrize(
+        ('raw_color', 'expected'),
+        [
+            ('#abc', '#AABBCC'),
+            (' #233b5c ', '#233B5C'),
+        ],
+    )
+    def test_hex_color_field_normalizes_short_and_lowercase(
+        self, raw_color: str, expected: str
+    ) -> None:
+        field = HexColorField()
+        assert field.to_internal_value(raw_color) == expected
+
+    @pytest.mark.parametrize(
+        'invalid_color',
+        ['233B5C', '#12345', '#GGGGGG', '{{7*7}}', '<script>'],
+    )
+    def test_hex_color_field_rejects_invalid_and_ssti_payloads(self, invalid_color: str) -> None:
+        field = HexColorField()
+        with pytest.raises(drf_serializers.ValidationError, match='Informe uma cor em hexadecimal'):
+            field.to_internal_value(invalid_color)
+
+    def test_salon_profile_serializer_validate_name_and_empty_optional_colors(self) -> None:
+        assert SalonProfileSerializer.validate_name('  Salão Elegance  ') == 'Salão Elegance'
+        with pytest.raises(drf_serializers.ValidationError, match='ao menos 2 caracteres'):
+            SalonProfileSerializer.validate_name(' A ')
+
+        serializer = SalonProfileSerializer()
+        cleaned = serializer.validate({'secondary_color': '', 'accent_color': None})
+        assert cleaned['secondary_color'] is None
+        assert cleaned['accent_color'] is None
+
+    def test_employee_write_serializer_field_validators(self) -> None:
+        assert (
+            EmployeeWriteSerializer.validate_full_name('  Maria   Eduarda  ') == 'Maria Eduarda'
+        )
+        with pytest.raises(drf_serializers.ValidationError, match='nome completo'):
+            EmployeeWriteSerializer.validate_full_name('Ab')
+
+        assert EmployeeWriteSerializer.validate_cpf_cnpj('123.456.789-01') == '12345678901'
+        assert (
+            EmployeeWriteSerializer.validate_cpf_cnpj('12.345.678/0001-99') == '12345678000199'
+        )
+        with pytest.raises(drf_serializers.ValidationError, match='CPF .* ou CNPJ'):
+            EmployeeWriteSerializer.validate_cpf_cnpj('123456')
+
+    @pytest.mark.parametrize(
+        ('current_status', 'next_status', 'is_valid'),
+        [
+            (Appointment.Status.PENDING, Appointment.Status.CONFIRMED, True),
+            (Appointment.Status.PENDING, Appointment.Status.CANCELLED, True),
+            (Appointment.Status.PENDING, Appointment.Status.COMPLETED, False),
+            (Appointment.Status.CONFIRMED, Appointment.Status.COMPLETED, True),
+            (Appointment.Status.COMPLETED, Appointment.Status.CANCELLED, False),
+            (Appointment.Status.CANCELLED, Appointment.Status.CONFIRMED, False),
+        ],
+    )
+    def test_appointment_status_transitions(
+        self, current_status: str, next_status: str, is_valid: bool
+    ) -> None:
+        instance = MagicMock(status=current_status)
+        serializer = AppointmentStatusSerializer(instance=instance)
+        if is_valid:
+            assert serializer.validate_status(next_status) == next_status
+        else:
+            with pytest.raises(drf_serializers.ValidationError, match='não é permitida'):
+                serializer.validate_status(next_status)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  TESTES DE INTEGRAÇÃO COMPLEMENTARES (VIEWS DRF DO APP BUSINESS)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class AppointmentLifecycleAndAvailabilityIntegrationTest(BaseBusinessTestCase):
+    """Cobre atualização, transição de status, cancelamento (DELETE) e endpoint de disponibilidade."""
+
+    def test_appointment_detail_update_status_and_soft_delete(self) -> None:
+        self._auth(self.manager_user)
+        start = timezone.now() + timedelta(days=1, hours=2)
+
+        create_resp = self.client.post(
+            '/api/v1/appointments',
+            {
+                'client_id': str(self.customer.id),
+                'services': [
+                    {
+                        'service_id': self.service_salon.id,
+                        'professional_id': str(self.owner_employee.id),
+                    }
+                ],
+                'start_time': start.isoformat(),
+            },
+            format='json',
+        )
+        self.assertEqual(create_resp.status_code, status.HTTP_201_CREATED)
+        appt_id = create_resp.data['id']
+
+        # PUT para atualizar observações e desconto
+        new_start = start + timedelta(hours=1)
+        put_resp = self.client.put(
+            f'/api/v1/appointments/{appt_id}',
+            {
+                'client_id': str(self.customer.id),
+                'services': [
+                    {
+                        'service_id': self.service_salon.id,
+                        'professional_id': str(self.owner_employee.id),
+                    }
+                ],
+                'start_time': new_start.isoformat(),
+                'discount': '10.00',
+                'notes': 'Cliente VIP',
+            },
+            format='json',
+        )
+        self.assertEqual(put_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(put_resp.data['discount'], '10.00')
+        self.assertEqual(put_resp.data['notes'], 'Cliente VIP')
+
+        # PATCH status: pending -> confirmed
+        status_resp = self.client.patch(
+            f'/api/v1/appointments/{appt_id}/status',
+            {'status': Appointment.Status.CONFIRMED},
+            format='json',
+        )
+        self.assertEqual(status_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(status_resp.data['status'], Appointment.Status.CONFIRMED)
+
+        # DELETE realiza soft-delete mudando para cancelled
+        del_resp = self.client.delete(f'/api/v1/appointments/{appt_id}')
+        self.assertEqual(del_resp.status_code, status.HTTP_204_NO_CONTENT)
+
+        # Tentar editar ou cancelar novamente um agendamento cancelado retorna 400
+        edit_cancelled = self.client.put(
+            f'/api/v1/appointments/{appt_id}',
+            {
+                'services': [{'service_id': self.service_salon.id}],
+                'start_time': new_start.isoformat(),
+            },
+            format='json',
+        )
+        self.assertEqual(edit_cancelled.status_code, status.HTTP_400_BAD_REQUEST)
+
+        del_again = self.client.delete(f'/api/v1/appointments/{appt_id}')
+        self.assertEqual(del_again.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_availability_endpoint_and_salon_branding_views(self) -> None:
+        self._auth(self.owner_user)
+        target_day = (timezone.localdate() + timedelta(days=3)).isoformat()
+
+        avail_resp = self.client.get(
+            '/api/v1/availability',
+            {
+                'date': target_day,
+                'professional': str(self.owner_employee.id),
+                'service': str(self.service_salon.id),
+            },
+        )
+        self.assertEqual(avail_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(avail_resp.data['duration_minutes'], 60)
+        self.assertTrue(len(avail_resp.data['slots']) > 0)
+
+        # Branding autenticado e público
+        branding_resp = self.client.get('/api/v1/salon/branding')
+        self.assertEqual(branding_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(branding_resp.data['slug'], 'salao-teste')
+
+        public_branding = self.client.get('/api/v1/public/salons/salao-teste/branding')
+        self.assertEqual(public_branding.status_code, status.HTTP_200_OK)
+
+        # Atualização do perfil e cores do salão
+        profile_patch = self.client.patch(
+            '/api/v1/salon/profile',
+            {'display_name': 'Salão Top', 'primary_color': '#abc'},
+            format='json',
+        )
+        self.assertEqual(profile_patch.status_code, status.HTTP_200_OK)
+        self.assertEqual(profile_patch.data['brand_name'], 'Salão Top')
+        self.assertEqual(profile_patch.data['primary_color'], '#AABBCC')
+
+    def test_staff_crud_and_soft_delete(self) -> None:
+        self._auth(self.owner_user)
+        create_staff = self.client.post(
+            '/api/v1/staff',
+            {
+                'full_name': 'Fernanda Lima',
+                'cpf_cnpj': '987.654.321-00',
+                'role': Employee.Role.PROFESSIONAL,
+                'contract_type': Employee.ContractType.COMMISSION,
+                'is_schedulable': True,
+                'default_commission_rate': '45.00',
+                'services': [
+                    {'service_id': self.service_salon.id, 'commission_rate': '50.00'}
+                ],
+            },
+            format='json',
+        )
+        self.assertEqual(create_staff.status_code, status.HTTP_201_CREATED)
+        staff_id = create_staff.data['id']
+        self.assertEqual(create_staff.data['cpf_cnpj'], '98765432100')
+
+        # Desativar colaborador via DELETE
+        del_staff = self.client.delete(f'/api/v1/staff/{staff_id}')
+        self.assertEqual(del_staff.status_code, status.HTTP_204_NO_CONTENT)
