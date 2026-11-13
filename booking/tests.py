@@ -1,5 +1,5 @@
 """Testes unitários e de integração para os endpoints públicos de agendamento (booking)."""
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -251,3 +251,179 @@ class TestPublicBookingEndpointsIntegration:
         )
         assert unlisted_resp.status_code == status.HTTP_400_BAD_REQUEST
         assert 'services' in unlisted_resp.data
+
+    def test_professional_choice_rules_auto_single_and_required_setting(
+        self, booking_env: dict[str, Any]
+    ) -> None:
+        client = APIClient()
+        salon: Salon = booking_env['salon']
+        start_dt = (timezone.now() + timedelta(days=3)).replace(
+            hour=10, minute=0, second=0, microsecond=0
+        )
+
+        # 1. Quando só 1 profissional faz o serviço (Coloração -> apenas Juliana),
+        #    mesmo sem professional_id no payload, Juliana é predefinida automaticamente.
+        resp_single = client.post(
+            '/api/v1/booking/studio-belle/appointments',
+            {
+                'client_name': 'Helena Rizzo',
+                'client_phone': '(11) 99222-3344',
+                'start_time': start_dt.isoformat(),
+                'services': [{'service_id': booking_env['ss_color'].id}],
+            },
+            format='json',
+        )
+        assert resp_single.status_code == status.HTTP_201_CREATED
+        assert resp_single.data['services'][0]['professional_name'] == 'Juliana'
+
+        # 2. Quando o salão NÃO obriga (default False) e há 2 profissionais (Corte),
+        #    aceita sem professional_id ("Indiferente" -> None).
+        resp_indifferent = client.post(
+            '/api/v1/booking/studio-belle/appointments',
+            {
+                'client_name': 'Helena Rizzo',
+                'client_phone': '(11) 99222-3344',
+                'start_time': (start_dt + timedelta(hours=3)).isoformat(),
+                'services': [{'service_id': booking_env['ss_cut'].id}],
+            },
+            format='json',
+        )
+        assert resp_indifferent.status_code == status.HTTP_201_CREATED
+        assert resp_indifferent.data['services'][0]['professional_name'] is None
+
+        # 3. Quando o salão OBRIGA a escolha (require_professional_choice=True)
+        #    e há mais de 1 profissional, omitir professional_id retorna 400.
+        salon.require_professional_choice = True
+        salon.save(update_fields=['require_professional_choice'])
+
+        salon_resp = client.get('/api/v1/booking/studio-belle/salon')
+        assert salon_resp.data['require_professional_choice'] is True
+
+        resp_missing = client.post(
+            '/api/v1/booking/studio-belle/appointments',
+            {
+                'client_name': 'Helena Rizzo',
+                'client_phone': '(11) 99222-3344',
+                'start_time': (start_dt + timedelta(hours=5)).isoformat(),
+                'services': [{'service_id': booking_env['ss_cut'].id}],
+            },
+            format='json',
+        )
+        assert resp_missing.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'services' in resp_missing.data
+
+        # Mas se o serviço tiver apenas 1 profissional (Coloração), continua auto-predefinido!
+        resp_auto_when_required = client.post(
+            '/api/v1/booking/studio-belle/appointments',
+            {
+                'client_name': 'Helena Rizzo',
+                'client_phone': '(11) 99222-3344',
+                'start_time': (start_dt + timedelta(hours=5)).isoformat(),
+                'services': [{'service_id': booking_env['ss_color'].id}],
+            },
+            format='json',
+        )
+        assert resp_auto_when_required.status_code == status.HTTP_201_CREATED
+        assert resp_auto_when_required.data['services'][0]['professional_name'] == 'Juliana'
+
+    def test_availability_30min_step_and_multi_professional_chain_reconciliation(
+        self, booking_env: dict[str, Any]
+    ) -> None:
+        client = APIClient()
+        future_tuesday = timezone.localdate() + timedelta(
+            days=((1 - timezone.localdate().weekday()) % 7 or 7)
+        )
+        cut_id = booking_env['ss_cut'].id      # 60 min
+        color_id = booking_env['ss_color'].id  # 90 min
+        juliana_id = str(booking_env['prof_juliana'].id)
+        camila_id = str(booking_env['prof_camila'].id)
+
+        # Camila ocupada das 09:00 às 10:00 na terça
+        tz = timezone.get_current_timezone()
+        camila_busy_start = datetime.combine(future_tuesday, time(9, 0), tzinfo=tz)
+        client.post(
+            '/api/v1/booking/studio-belle/appointments',
+            {
+                'client_name': 'Cliente Agenda',
+                'client_phone': '(11) 99000-1122',
+                'start_time': camila_busy_start.isoformat(),
+                'services': [{'service_id': cut_id, 'professional_id': camila_id}],
+            },
+            format='json',
+        )
+
+        # Cadeia: Corte com Camila (60m) + Coloração com Juliana (90m) = 150m
+        resp = client.get(
+            '/api/v1/booking/studio-belle/availability',
+            {
+                'date': future_tuesday.isoformat(),
+                'items': f'{cut_id}:{camila_id},{color_id}:{juliana_id}',
+            },
+        )
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.data['slot_minutes'] == 30
+        assert resp.data['duration_minutes'] == 150
+
+        labels = [slot['label'] for slot in resp.data['slots']]
+        # Intervalo de 30 em 30 min (não existem horários :15 ou :45)
+        assert all(lbl.endswith(':00') or lbl.endswith(':30') for lbl in labels)
+        # 08:30 (Camila 08:30–09:30) e 09:00 / 09:30 conflitam com Camila ocupada 09:00–10:00
+        assert '08:00' in labels
+        assert '08:30' not in labels
+        assert '09:00' not in labels
+        assert '09:30' not in labels
+        assert '10:00' in labels
+
+        slot_10 = next(s for s in resp.data['slots'] if s['label'] == '10:00')
+        assert slot_10['end_label'] == '12:30'
+        assert len(slot_10['segments']) == 2
+        assert slot_10['segments'][0]['start_label'] == '10:00'
+        assert slot_10['segments'][0]['end_label'] == '11:00'
+        assert slot_10['segments'][0]['professional_name'] == 'Camila'
+        assert slot_10['segments'][1]['start_label'] == '11:00'
+        assert slot_10['segments'][1]['end_label'] == '12:30'
+        assert slot_10['segments'][1]['professional_name'] == 'Juliana'
+
+        # Payload inválido em items (ex: SSTI) -> 400
+        bad_items = client.get(
+            '/api/v1/booking/studio-belle/availability',
+            {'date': future_tuesday.isoformat(), 'items': '{{7*7}}:abc'},
+        )
+        assert bad_items.status_code == status.HTTP_400_BAD_REQUEST
+
+    def test_multi_date_sessions_booking_for_same_service_on_different_days(
+        self, booking_env: dict[str, Any]
+    ) -> None:
+        client = APIClient()
+        base = timezone.localtime(timezone.now())
+        day_1 = (base + timedelta(days=4)).replace(
+            hour=14, minute=0, second=0, microsecond=0
+        )
+        day_2 = (base + timedelta(days=6)).replace(
+            hour=16, minute=30, second=0, microsecond=0
+        )
+
+        payload = {
+            'client_name': 'Bruna Marquezine',
+            'client_phone': '(11) 99444-5566',
+            'sessions': [
+                {
+                    'start_time': day_1.isoformat(),
+                    'services': [{'service_id': booking_env['ss_color'].id}],
+                },
+                {
+                    'start_time': day_2.isoformat(),
+                    'services': [{'service_id': booking_env['ss_color'].id}],
+                },
+            ],
+        }
+
+        resp = client.post('/api/v1/booking/studio-belle/appointments', payload, format='json')
+        assert resp.status_code == status.HTTP_201_CREATED
+        assert len(resp.data['sessions']) == 2
+        assert Decimal(str(resp.data['total_price'])) == Decimal('400.00')
+        assert resp.data['sessions'][0]['start_time'] == '14:00'
+        assert resp.data['sessions'][0]['end_time'] == '15:30'
+        assert resp.data['sessions'][1]['start_time'] == '16:30'
+        assert resp.data['sessions'][1]['end_time'] == '18:00'
+

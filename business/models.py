@@ -57,6 +57,15 @@ class Salon(TimeStampedModel):
         verbose_name="Cor de Destaque", help_text="Opcional. Se vazio, é derivada da cor principal.",
     )
 
+    # ── Agendamento online ───────────────────────────────────
+    require_professional_choice = models.BooleanField(
+        default=False, verbose_name="Escolha de profissional obrigatória",
+        help_text=(
+            "Quando ativo, a cliente precisa escolher o profissional de cada serviço no agendamento online. "
+            "Quando inativo, ela pode marcar 'Indiferente' e o salão define o profissional depois."
+        ),
+    )
+
     @property
     def brand_name(self) -> str:
         return self.display_name or self.name

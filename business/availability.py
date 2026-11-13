@@ -1,6 +1,7 @@
 """Cálculo dos horários disponíveis para agendamento."""
-
+from dataclasses import dataclass
 from datetime import date as date_cls, datetime, time, timedelta
+from typing import Sequence
 
 from django.utils import timezone
 
@@ -105,6 +106,19 @@ def _period(moment: datetime) -> str:
     return 'evening'
 
 
+def working_window(day: date_cls, working_hours: tuple[time, time] | None) -> tuple[datetime, datetime] | None:
+    """Converte o expediente do dia em datetimes aware (abertura, fechamento)."""
+    if not working_hours:
+        return None
+    tz = timezone.get_current_timezone()
+    opens_at, closes_at = working_hours
+    opening = timezone.make_aware(datetime.combine(day, opens_at), tz)
+    closing = timezone.make_aware(datetime.combine(day, closes_at), tz)
+    if closing <= opening:
+        closing += timedelta(days=1)
+    return opening, closing
+
+
 def build_slots(
     day: date_cls,
     duration_minutes: int,
@@ -113,15 +127,12 @@ def build_slots(
     slot_minutes: int = DEFAULT_SLOT_MINUTES,
 ) -> list[dict]:
     """Gera os horários livres do dia respeitando duração, expediente e agenda."""
-    if not working_hours:
+    window = working_window(day, working_hours)
+    if not window:
         return []
 
     tz = timezone.get_current_timezone()
-    opens_at, closes_at = working_hours
-    opening = timezone.make_aware(datetime.combine(day, opens_at), tz)
-    closing = timezone.make_aware(datetime.combine(day, closes_at), tz)
-    if closing <= opening:
-        closing += timedelta(days=1)
+    opening, closing = window
 
     step = timedelta(minutes=slot_minutes)
     duration = timedelta(minutes=duration_minutes)
@@ -143,5 +154,97 @@ def build_slots(
                 'period': _period(local_start),
             })
         cursor += step
+
+    return slots
+
+
+# ──────────────────────────────────────────────────────────────
+#  Disponibilidade em cadeia (booking público)
+#  Um atendimento é uma sequência de serviços; cada serviço pode ter
+#  um profissional definido, vários aptos ("indiferente") ou nenhum.
+# ──────────────────────────────────────────────────────────────
+
+PUBLIC_BOOKING_SLOT_MINUTES = 30
+
+BusyRanges = Sequence[tuple[datetime, datetime]]
+
+
+@dataclass(frozen=True)
+class ChainStep:
+    """
+    Etapa de um atendimento.
+
+    `candidates` contém a agenda ocupada de cada profissional apto a executar a etapa.
+    A etapa está livre quando AO MENOS UM candidato está livre no intervalo.
+    Sem candidatos, a etapa não tem restrição de agenda (o salão define depois).
+    """
+    duration_minutes: int
+    candidates: tuple[BusyRanges, ...] = ()
+
+
+def is_free(start: datetime, end: datetime, busy: BusyRanges) -> bool:
+    """True quando [start, end) não cruza nenhum intervalo ocupado."""
+    return not any(start < busy_end and end > busy_start for busy_start, busy_end in busy)
+
+
+def chain_segments(start: datetime, steps: Sequence[ChainStep]) -> list[tuple[datetime, datetime]] | None:
+    """Intervalos de cada etapa iniciando em `start`, ou None se alguma etapa estiver ocupada."""
+    segments: list[tuple[datetime, datetime]] = []
+    cursor = start
+    for step in steps:
+        end = cursor + timedelta(minutes=step.duration_minutes)
+        if step.candidates and not any(is_free(cursor, end, busy) for busy in step.candidates):
+            return None
+        segments.append((cursor, end))
+        cursor = end
+    return segments
+
+
+def fits_working_hours(start: datetime, end: datetime, operating_hours: object) -> bool:
+    """True quando o intervalo cabe inteiro no expediente do dia em que começa."""
+    local_day = timezone.localtime(start).date()
+    window = working_window(local_day, get_working_hours(operating_hours, local_day))
+    return window is not None and window[0] <= start and end <= window[1]
+
+
+def build_chain_slots(
+    day: date_cls,
+    steps: Sequence[ChainStep],
+    working_hours: tuple[time, time] | None,
+    slot_minutes: int = PUBLIC_BOOKING_SLOT_MINUTES,
+    now: datetime | None = None,
+) -> list[dict]:
+    """
+    Horários de início em que TODAS as etapas cabem em sequência,
+    respeitando expediente e agenda de cada profissional.
+    Cada slot traz `segments`: o intervalo de cada etapa, na mesma ordem de `steps`.
+    """
+    window = working_window(day, working_hours)
+    if not window or not steps or slot_minutes <= 0:
+        return []
+
+    tz = timezone.get_current_timezone()
+    opening, closing = window
+    total = timedelta(minutes=sum(step.duration_minutes for step in steps))
+    step_delta = timedelta(minutes=slot_minutes)
+    reference = now or timezone.now()
+
+    slots: list[dict] = []
+    cursor = opening
+    while cursor + total <= closing:
+        if cursor >= reference:
+            segments = chain_segments(cursor, steps)
+            if segments is not None:
+                local_start = timezone.localtime(cursor, tz)
+                local_end = timezone.localtime(cursor + total, tz)
+                slots.append({
+                    'start': cursor,
+                    'end': cursor + total,
+                    'label': local_start.strftime('%H:%M'),
+                    'end_label': local_end.strftime('%H:%M'),
+                    'period': _period(local_start),
+                    'segments': segments,
+                })
+        cursor += step_delta
 
     return slots

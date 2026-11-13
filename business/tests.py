@@ -14,8 +14,10 @@ from rest_framework_simplejwt.tokens import AccessToken
 
 from auth_users.models import User
 from business.availability import (
+    ChainStep,
     DEFAULT_CLOSES_AT,
     DEFAULT_OPENS_AT,
+    build_chain_slots,
     build_slots,
     get_working_hours,
 )
@@ -399,6 +401,32 @@ class TestBusinessAvailabilityUnit:
         assert labels == ['09:00', '11:00']
         assert all(s['period'] == 'morning' for s in slots)
 
+    def test_build_chain_slots_reconciles_sequential_professionals(self) -> None:
+        future_day = timezone.localdate() + timedelta(days=5)
+        tz = timezone.get_current_timezone()
+        # Profissional 1 ocupada 09:00-09:30; Profissional 2 ocupada 10:30-11:00
+        p1_busy = ((timezone.make_aware(datetime.combine(future_day, time(9, 0)), tz),
+                    timezone.make_aware(datetime.combine(future_day, time(9, 30)), tz)),)
+        p2_busy = ((timezone.make_aware(datetime.combine(future_day, time(10, 30)), tz),
+                    timezone.make_aware(datetime.combine(future_day, time(11, 0)), tz)),)
+
+        steps = [
+            ChainStep(duration_minutes=30, candidates=(p1_busy,)),
+            ChainStep(duration_minutes=30, candidates=(p2_busy,)),
+        ]
+        slots = build_chain_slots(
+            day=future_day,
+            steps=steps,
+            working_hours=(time(9, 0), time(11, 30)),
+            slot_minutes=30,
+        )
+        # 09:00 falha (P1 ocupada 09:00-09:30)
+        # 09:30 passa (P1 09:30-10:00 livre, P2 10:00-10:30 livre)
+        # 10:00 falha (P2 ocupada 10:30-11:00)
+        # 10:30 passa (P1 10:30-11:00 livre, P2 11:00-11:30 livre)
+        assert [s['label'] for s in slots] == ['09:30', '10:30']
+        assert [s['end_label'] for s in slots] == ['10:30', '11:30']
+
 
 class TestBusinessSerializersUnit:
     """Testes unitários de campos customizados e validadores de serializers do app business."""
@@ -574,15 +602,20 @@ class AppointmentLifecycleAndAvailabilityIntegrationTest(BaseBusinessTestCase):
         public_branding = self.client.get('/api/v1/public/salons/salao-teste/branding')
         self.assertEqual(public_branding.status_code, status.HTTP_200_OK)
 
-        # Atualização do perfil e cores do salão
+        # Atualização do perfil, cores e obrigatoriedade de profissional do salão
         profile_patch = self.client.patch(
             '/api/v1/salon/profile',
-            {'display_name': 'Salão Top', 'primary_color': '#abc'},
+            {
+                'display_name': 'Salão Top',
+                'primary_color': '#abc',
+                'require_professional_choice': True,
+            },
             format='json',
         )
         self.assertEqual(profile_patch.status_code, status.HTTP_200_OK)
         self.assertEqual(profile_patch.data['brand_name'], 'Salão Top')
         self.assertEqual(profile_patch.data['primary_color'], '#AABBCC')
+        self.assertTrue(profile_patch.data['require_professional_choice'])
 
     def test_staff_crud_and_soft_delete(self) -> None:
         self._auth(self.owner_user)

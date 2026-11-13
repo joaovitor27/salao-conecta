@@ -456,6 +456,7 @@ class SalonProfileSerializer(serializers.ModelSerializer):
             'secondary_color',
             'accent_color',
             'operating_hours',
+            'require_professional_choice',
             'updated_at',
         )
         read_only_fields = ('id', 'slug', 'brand_name', 'logo_url', 'updated_at')

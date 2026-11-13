@@ -21,7 +21,13 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from business.availability import build_slots, get_working_hours, DEFAULT_SLOT_MINUTES
+from business.availability import (
+    ChainStep,
+    PUBLIC_BOOKING_SLOT_MINUTES,
+    build_chain_slots,
+    build_slots,
+    get_working_hours,
+)
 from business.models import Salon, ServiceSalon, Employee, Appointment
 from booking.serializers import (
     PublicSalonSerializer,
@@ -38,6 +44,43 @@ TAGS = ['Booking Público']
 def _get_active_salon(slug: str) -> Salon:
     """Busca o salão ativo pelo slug ou retorna 404."""
     return get_object_or_404(Salon, slug=slug, is_active=True)
+
+
+def _busy_ranges_for_professionals(
+    professionals: list[Employee],
+    day_start: datetime,
+) -> dict[str, list[tuple[datetime, datetime]]]:
+    """Retorna os intervalos ocupados no dia para cada profissional informado."""
+    if not professionals:
+        return {}
+    prof_ids = {p.id for p in professionals}
+    result: dict[str, list[tuple[datetime, datetime]]] = {str(pid): [] for pid in prof_ids}
+
+    day_window = DateTimeTZRange(lower=day_start, upper=day_start + timedelta(days=1))
+    booked = (
+        Appointment.objects.filter(
+            items__professional_id__in=prof_ids,
+            time_range__overlap=day_window,
+        )
+        .exclude(status=Appointment.Status.CANCELLED)
+        .prefetch_related('items')
+        .distinct()
+    )
+
+    for appt in booked:
+        if not appt.time_range or not appt.time_range.lower or not appt.time_range.upper:
+            continue
+        items = list(appt.items.all())
+        if not items:
+            continue
+        cursor = appt.time_range.lower
+        for item in items:
+            item_end = cursor + timedelta(minutes=item.duration_minutes)
+            if item.professional_id in prof_ids:
+                result[str(item.professional_id)].append((cursor, item_end))
+            cursor = item_end
+
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -143,8 +186,9 @@ class PublicProfessionalsView(APIView):
 
 class PublicAvailabilityView(APIView):
     """
-    GET → Horários livres para agendamento em uma data.
-    Reutiliza a lógica de `build_slots` existente.
+    GET → Horários livres para agendamento em uma data (de 30 em 30 min por padrão).
+    Aceita ?items=service_id:professional_id,service_id: para conciliar a agenda
+    de múltiplos serviços (com profissionais diferentes ou 'indiferente').
     """
     permission_classes = [AllowAny]
     authentication_classes = []
@@ -156,6 +200,10 @@ class PublicAvailabilityView(APIView):
             OpenApiParameter('date', str, description='Data desejada (YYYY-MM-DD). Padrão: hoje.'),
             OpenApiParameter('professional', str, description='ID do profissional (UUID).'),
             OpenApiParameter('service', str, description='IDs dos serviços (vírgula) para somar a duração.'),
+            OpenApiParameter(
+                'items', str,
+                description='Pares service_id:professional_id separados por vírgula para conciliar agendas.',
+            ),
             OpenApiParameter('duration', int, description='Duração total em minutos (sobrepõe os serviços).'),
         ],
     )
@@ -176,7 +224,31 @@ class PublicAvailabilityView(APIView):
         else:
             day = timezone.localdate()
 
-        # ── Duração ──────────────────────────────────────────
+        # ── Slot interval (padrão: 30 min no booking público) ─
+        try:
+            slot_minutes = int(params.get('slot_minutes') or PUBLIC_BOOKING_SLOT_MINUTES)
+        except ValueError:
+            slot_minutes = PUBLIC_BOOKING_SLOT_MINUTES
+        slot_minutes = max(5, min(slot_minutes, 60))
+
+        working_hours = get_working_hours(salon.operating_hours, day)
+        day_reference = timezone.make_aware(
+            datetime.combine(day, time.min), timezone.get_current_timezone()
+        )
+
+        # ── Modo em cadeia (?items=1:uuid,2:) ────────────────
+        raw_items = (params.get('items') or '').strip()
+        if raw_items:
+            return self._chain_availability(
+                salon=salon,
+                day=day,
+                day_reference=day_reference,
+                working_hours=working_hours,
+                slot_minutes=slot_minutes,
+                raw_items=raw_items,
+            )
+
+        # ── Modo simples (compatível com chamadas existentes) ─
         duration = 0
         raw_duration = params.get('duration')
         if raw_duration:
@@ -204,14 +276,6 @@ class PublicAvailabilityView(APIView):
         if duration <= 0:
             duration = 30
 
-        # ── Slot interval ────────────────────────────────────
-        try:
-            slot_minutes = int(params.get('slot_minutes') or DEFAULT_SLOT_MINUTES)
-        except ValueError:
-            slot_minutes = DEFAULT_SLOT_MINUTES
-        slot_minutes = max(5, min(slot_minutes, 60))
-
-        # ── Profissional e agenda ocupada ────────────────────
         professional = None
         raw_professional = params.get('professional')
         if raw_professional:
@@ -226,31 +290,16 @@ class PublicAvailabilityView(APIView):
 
         busy: list[tuple[datetime, datetime]] = []
         if professional:
-            reference = timezone.make_aware(
-                datetime.combine(day, time.min), timezone.get_current_timezone()
-            )
-            booked = Appointment.objects.filter(
-                items__professional=professional
-            ).exclude(
-                status=Appointment.Status.CANCELLED
-            ).filter(
-                time_range__overlap=DateTimeTZRange(
-                    lower=reference, upper=reference + timedelta(days=1)
-                )
-            ).distinct()
-            busy = [
-                (appt.time_range.lower, appt.time_range.upper)
-                for appt in booked
-                if appt.time_range and appt.time_range.lower and appt.time_range.upper
-            ]
+            busy_map = _busy_ranges_for_professionals([professional], day_reference)
+            busy = busy_map.get(str(professional.id), [])
 
-        working_hours = get_working_hours(salon.operating_hours, day)
         slots = build_slots(day, duration, busy, working_hours, slot_minutes)
 
         return Response({
             'date': day.isoformat(),
             'professional_id': str(professional.id) if professional else None,
             'duration_minutes': duration,
+            'slot_minutes': slot_minutes,
             'opens_at': working_hours[0].strftime('%H:%M') if working_hours else None,
             'closes_at': working_hours[1].strftime('%H:%M') if working_hours else None,
             'is_closed': working_hours is None,
@@ -266,6 +315,131 @@ class PublicAvailabilityView(APIView):
             ],
         })
 
+    def _chain_availability(
+        self,
+        salon: Salon,
+        day,
+        day_reference: datetime,
+        working_hours,
+        slot_minutes: int,
+        raw_items: str,
+    ) -> Response:
+        parsed_pairs: list[tuple[int, str | None]] = []
+        for token in raw_items.split(','):
+            token = token.strip()
+            if not token:
+                continue
+            parts = token.split(':', 1)
+            try:
+                sid = int(parts[0].strip())
+            except ValueError:
+                return Response(
+                    {'detail': 'IDs de serviço inválidos.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            pid = parts[1].strip() if len(parts) > 1 and parts[1].strip() else None
+            parsed_pairs.append((sid, pid))
+
+        if not parsed_pairs:
+            return Response(
+                {'detail': 'Informe ao menos um item em items.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        service_map = {
+            s.id: s
+            for s in ServiceSalon.objects.filter(
+                id__in=[sid for sid, _ in parsed_pairs], salon=salon, is_active=True
+            ).select_related('service')
+        }
+
+        all_schedulable = list(
+            Employee.objects.filter(salon=salon, is_active=True, is_schedulable=True)
+            .prefetch_related('employee_services')
+            .order_by('full_name')
+        )
+        prof_by_id = {str(p.id): p for p in all_schedulable}
+        capable_by_service: dict[int, list[Employee]] = {}
+        for emp in all_schedulable:
+            for es in emp.employee_services.all():
+                capable_by_service.setdefault(es.service_id, []).append(emp)
+
+        busy_map = _busy_ranges_for_professionals(all_schedulable, day_reference)
+
+        steps_meta: list[dict] = []
+        chain_steps: list[ChainStep] = []
+
+        for sid, pid in parsed_pairs:
+            service_salon = service_map.get(sid)
+            if service_salon is None:
+                return Response(
+                    {'detail': f'Serviço ID {sid} não encontrado.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            capable = capable_by_service.get(sid, [])
+            chosen_prof: Employee | None = None
+
+            if pid:
+                chosen_prof = prof_by_id.get(pid)
+                if chosen_prof is None or chosen_prof not in capable:
+                    return Response(
+                        {'detail': 'Profissional inválido para o serviço selecionado.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                candidates = (tuple(busy_map.get(str(chosen_prof.id), [])),)
+            elif len(capable) == 1:
+                chosen_prof = capable[0]
+                candidates = (tuple(busy_map.get(str(chosen_prof.id), [])),)
+            elif capable:
+                candidates = tuple(tuple(busy_map.get(str(c.id), [])) for c in capable)
+            else:
+                candidates = ()
+
+            chain_steps.append(
+                ChainStep(duration_minutes=service_salon.duration_minutes, candidates=candidates)
+            )
+            steps_meta.append({
+                'service_id': service_salon.id,
+                'service_name': service_salon.service.name,
+                'duration_minutes': service_salon.duration_minutes,
+                'professional_id': str(chosen_prof.id) if chosen_prof else None,
+                'professional_name': chosen_prof.full_name.split()[0] if chosen_prof else None,
+            })
+
+        total_duration = sum(step.duration_minutes for step in chain_steps)
+        slots = build_chain_slots(day, chain_steps, working_hours, slot_minutes)
+        tz = timezone.get_current_timezone()
+
+        return Response({
+            'date': day.isoformat(),
+            'professional_id': (
+                steps_meta[0]['professional_id'] if len(steps_meta) == 1 else None
+            ),
+            'duration_minutes': total_duration,
+            'slot_minutes': slot_minutes,
+            'opens_at': working_hours[0].strftime('%H:%M') if working_hours else None,
+            'closes_at': working_hours[1].strftime('%H:%M') if working_hours else None,
+            'is_closed': working_hours is None,
+            'slots': [
+                {
+                    'start': slot['start'].isoformat(),
+                    'end': slot['end'].isoformat(),
+                    'label': slot['label'],
+                    'end_label': slot['end_label'],
+                    'period': slot['period'],
+                    'segments': [
+                        {
+                            **meta,
+                            'start_label': timezone.localtime(seg[0], tz).strftime('%H:%M'),
+                            'end_label': timezone.localtime(seg[1], tz).strftime('%H:%M'),
+                        }
+                        for meta, seg in zip(steps_meta, slot['segments'])
+                    ],
+                }
+                for slot in slots
+            ],
+        })
+
 
 # ═══════════════════════════════════════════════════════════════
 #  POST: Criar agendamento
@@ -273,7 +447,7 @@ class PublicAvailabilityView(APIView):
 
 class PublicBookingCreateView(APIView):
     """
-    POST → Cria um agendamento público (self-service).
+    POST → Cria um ou mais agendamentos públicos (self-service).
     Identifica a cliente por nome + telefone (sem login).
     Retorna resumo completo com URL do WhatsApp.
     """
@@ -295,7 +469,8 @@ class PublicBookingCreateView(APIView):
             context={'request': request, 'salon': salon},
         )
         serializer.is_valid(raise_exception=True)
-        appointment = serializer.save()
+        appointments = serializer.save()
 
-        confirmation = BookingConfirmationSerializer.build_from_appointment(appointment)
+        confirmation = BookingConfirmationSerializer.build_from_appointments(appointments)
         return Response(confirmation, status=status.HTTP_201_CREATED)
+
